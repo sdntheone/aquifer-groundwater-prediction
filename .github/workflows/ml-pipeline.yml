@@ -1,0 +1,61 @@
+name: ML Pipeline CI
+
+# Basic MLOps automation:
+#  - on every push, retrain the model from data/ to make sure the
+#    pipeline still runs cleanly end-to-end
+#  - validate model quality against a minimum ROC-AUC threshold (a simple
+#    "model gate" so a degraded model can't silently ship)
+#  - build the Docker image to make sure the deployable artifact is valid
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  train-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model
+        run: python train.py
+
+      - name: Run inference on prediction set
+        run: python predict.py
+
+      - name: Quality gate — fail if ROC-AUC drops below threshold
+        run: |
+          python - <<'EOF'
+          import json, sys
+          m = json.load(open("model/metrics.json"))
+          auc = m["roc_auc_cv_mean"]
+          print(f"CV ROC-AUC: {auc:.4f}")
+          THRESHOLD = 0.80
+          if auc < THRESHOLD:
+              print(f"Model quality gate FAILED ({auc:.4f} < {THRESHOLD})")
+              sys.exit(1)
+          print("Model quality gate passed.")
+          EOF
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: model/
+
+  docker-build:
+    needs: train-and-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t groundwater-app:ci .

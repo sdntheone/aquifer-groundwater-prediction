@@ -1,0 +1,64 @@
+[
+  {
+    "timestamp": "2026-06-23 09:28:31",
+    "model": "RandomForestClassifier",
+    "params": {
+      "n_estimators": 400,
+      "class_weight": "balanced",
+      "min_samples_leaf": 2
+    },
+    "metrics": {
+      "accuracy": 0.998211091234347,
+      "precision": 1.0,
+      "recall": 0.875,
+      "f1_score": 0.9333333333333333,
+      "roc_auc_test": 1.0,
+      "roc_auc_cv_mean": 0.9824602965092982,
+      "roc_auc_cv_std": 0.03109160944689356,
+      "confusion_matrix": [
+        [
+          551,
+          0
+        ],
+        [
+          1,
+          7
+        ]
+      ],
+      "n_train": 2234,
+      "n_test": 559,
+      "positive_rate": 0.013963480128893663
+    }
+  },
+  {
+    "timestamp": "2026-06-23 20:43:07",
+    "model": "RandomForestClassifier",
+    "params": {
+      "n_estimators": 400,
+      "class_weight": "balanced",
+      "min_samples_leaf": 2
+    },
+    "metrics": {
+      "accuracy": 0.9928443649373881,
+      "precision": 0.6666666666666666,
+      "recall": 1.0,
+      "f1_score": 0.8,
+      "roc_auc_test": 0.9993194192377496,
+      "roc_auc_cv_mean": 0.9911522851014685,
+      "roc_auc_cv_std": 0.012590123151276705,
+      "confusion_matrix": [
+        [
+          547,
+          4
+        ],
+        [
+          0,
+          8
+        ]
+      ],
+      "n_train": 2234,
+      "n_test": 559,
+      "positive_rate": 0.013963480128893663
+    }
+  }
+]

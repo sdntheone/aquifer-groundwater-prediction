@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AQUIFER — Groundwater Presence Prediction</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0b1d1a;
+    --deep:#0f2b27;
+    --teal:#13413a;
+    --aqua:#3fb6a8;
+    --amber:#d98b3f;
+    --sand:#f3ecdd;
+    --paper:#fbf8f0;
+    --line: rgba(243,236,221,0.14);
+    --good:#5fb88a;
+    --bad:#c9663f;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--ink);color:var(--sand);
+    font-family:'Spectral',serif;}
+  #app{display:grid;grid-template-columns: 420px 1fr; height:100vh;}
+  @media (max-width: 900px){ #app{grid-template-columns: 1fr; grid-template-rows: auto 1fr;} }
+
+  /* ---------- Sidebar ---------- */
+  #side{background:var(--deep); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow-y:auto;}
+  .brand{padding:24px 24px 14px; border-bottom:1px solid var(--line);}
+  .brand .mark{font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.22em; color:var(--aqua); text-transform:uppercase;}
+  .brand h1{margin:6px 0 4px; font-size:24px; font-weight:700; color:var(--paper); line-height:1.1;}
+  .brand p{margin:0; font-size:12.5px; color:rgba(243,236,221,0.6); line-height:1.5;}
+
+  .panel{padding:18px 24px; border-bottom:1px solid var(--line);}
+  .panel h2{font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--aqua); margin:0 0 12px; display:flex; align-items:center; justify-content:space-between;}
+
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .field{margin-bottom:10px;}
+  .field label{display:flex; justify-content:space-between; font-size:11px; color:rgba(243,236,221,0.55); margin-bottom:4px; font-family:'JetBrains Mono',monospace;}
+  .field label .range{color:rgba(243,236,221,0.32);}
+  .field input{width:100%; padding:8px 10px; border-radius:6px; border:1px solid var(--line);
+    background:var(--ink); color:var(--paper); font-family:'JetBrains Mono',monospace; font-size:13px;}
+  .field input:focus{outline:none; border-color:var(--aqua);}
+  .field input.invalid{border-color:var(--bad);}
+  .field-error{font-size:10.5px; color:var(--bad); margin-top:3px; display:none;}
+  .field-error.show{display:block;}
+
+  button.go{width:100%; margin-top:6px; padding:11px; border:none; border-radius:6px;
+    background:var(--aqua); color:var(--ink); font-weight:700; font-family:'JetBrains Mono',monospace;
+    font-size:12px; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; transition:.15s;}
+  button.go:hover{background:#56cabb;}
+  button.go:disabled{opacity:.5; cursor:not-allowed;}
+  .hint{font-size:11px; color:rgba(243,236,221,0.4); margin-top:8px; line-height:1.5;}
+
+  #result{padding:20px 24px; flex:1;}
+  .verdict{display:flex; align-items:baseline; gap:10px; margin-bottom:6px;}
+  .verdict .badge{font-family:'JetBrains Mono',monospace; font-size:11px; padding:3px 8px; border-radius:20px; letter-spacing:.05em;}
+  .badge.good{background:rgba(95,184,138,0.18); color:var(--good); border:1px solid rgba(95,184,138,0.4);}
+  .badge.bad{background:rgba(201,102,63,0.18); color:var(--bad); border:1px solid rgba(201,102,63,0.4);}
+  .badge.src{background:rgba(63,182,168,0.14); color:var(--aqua); border:1px solid rgba(63,182,168,0.35);}
+  .prob{font-family:'JetBrains Mono',monospace; font-size:34px; font-weight:700; color:var(--paper);}
+  .prob small{font-size:14px; color:rgba(243,236,221,0.5); font-weight:400;}
+
+  .meter{height:6px; border-radius:4px; background:rgba(243,236,221,0.12); overflow:hidden; margin:10px 0 14px;}
+  .meter span{display:block; height:100%; background:linear-gradient(90deg,var(--bad),var(--amber),var(--good));}
+
+  .place{font-family:'JetBrains Mono',monospace; font-size:12.5px; color:var(--paper); background:var(--ink);
+    border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin-bottom:14px; line-height:1.5;}
+  .place .label{color:var(--aqua); font-size:10px; letter-spacing:.1em; text-transform:uppercase; display:block; margin-bottom:3px;}
+
+  #reasoning{font-size:14px; line-height:1.65; color:rgba(243,236,221,0.88); white-space:pre-wrap;}
+  #reasoning strong{color:var(--paper);}
+
+  .empty{color:rgba(243,236,221,0.4); font-size:13px; line-height:1.6;}
+
+  .spinner{width:14px;height:14px;border-radius:50%;border:2px solid rgba(11,29,26,0.3);
+    border-top-color:var(--ink); display:inline-block; animation:spin .7s linear infinite; vertical-align:-2px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* ---------- Map ---------- */
+  #map{height:100%; width:100%;}
+  .leaflet-popup-content-wrapper{background:var(--deep); color:var(--sand); border-radius:8px;}
+  .leaflet-popup-tip{background:var(--deep);}
+  .leaflet-popup-content{font-family:'JetBrains Mono',monospace; font-size:12px;}
+
+  #topbar{position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:500;
+    background:rgba(15,43,39,0.92); border:1px solid var(--line); border-radius:30px;
+    padding:8px 16px; font-family:'JetBrains Mono',monospace; font-size:11px; color:rgba(243,236,221,0.7);
+    backdrop-filter: blur(6px); text-align:center; max-width:90%;}
+
+  /* ---------- Glossary ---------- */
+  #glossaryToggle{cursor:pointer; user-select:none;}
+  #glossaryToggle:hover{color:var(--aqua);}
+  #glossaryArrow{display:inline-block; transition:transform .2s; margin-left:8px;}
+  #glossaryArrow.open{transform:rotate(180deg);}
+  .glossary-item{margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--line);}
+  .glossary-item:last-child{border-bottom:none;}
+  .glossary-item-label{font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:700; color:var(--aqua); display:block; margin-bottom:4px;}
+  .glossary-item-desc{font-size:13px; line-height:1.6; color:rgba(243,236,221,0.82);}
+  .glossary-item-desc strong{color:var(--paper);}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <aside id="side">
+    <div class="brand">
+      <div class="mark">Groundwater Intelligence</div>
+      <h1>AQUIFER</h1>
+      <p>Enter the terrain, climate, and land-use values for a site below.
+      The model predicts groundwater presence, locates the closest matching
+      surveyed point, and explains its reasoning.</p>
+    </div>
+
+    <form class="panel" id="featureForm">
+      <h2>Site features <span id="rangeStatus" style="color:rgba(243,236,221,0.35); font-weight:400; text-transform:none; letter-spacing:0;">loading ranges…</span></h2>
+      <div class="grid2" id="featureFields"></div>
+      <button class="go" id="predictBtn" type="submit" disabled>Predict groundwater presence</button>
+      <p class="hint">Each value must fall within the range shown for that feature — these are the discretized classes used during model training.</p>
+    </form>
+
+    <div class="panel" id="glossaryPanel">
+      <h2 id="glossaryToggle" style="cursor:pointer;">What do these features mean? <span id="glossaryArrow">▾</span></h2>
+      <div id="glossaryBody" style="display:none;"></div>
+    </div>
+
+    <div id="result">
+      <div class="empty">No prediction yet. Fill in all site features on the left
+      and submit to see the groundwater prediction, matched location, and explanation.</div>
+    </div>
+  </aside>
+
+  <main style="position:relative;">
+    <div id="topbar">Random Forest · trained on 2,793 survey points · reasoning via Hugging Face LLM</div>
+    <div id="map"></div>
+  </main>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map', {zoomControl:true}).setView([25.6, 79.0], 8);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors', maxZoom: 17
+}).addTo(map);
+
+let queryMarker = null;
+
+// faint sample context points (just 1-2) so the map isn't completely blank
+fetch('/static/points.geojson').then(r => r.json()).then(geo => {
+  L.geoJSON(geo, {
+    pointToLayer: (feature, latlng) => L.circleMarker(latlng, {
+      radius: 6, fillColor: feature.properties.prediction === 1 ? '#5fb88a' : '#c9663f',
+      color: 'transparent', fillOpacity: 0.35,
+    }),
+    onEachFeature: (feature, layer) => {
+      layer.bindPopup('Sample reference point (context only)');
+    }
+  }).addTo(map);
+}).catch(()=>{});
+
+const FEATURE_LABELS = {
+  ELEVATION: "Elevation", CURVATURE: "Curvature", DRAINAGE: "Drainage density",
+  LITHOLOGY: "Lithology", LULC: "Land use / land cover", NDVI: "NDVI (vegetation)",
+  RAINFALL: "Rainfall", SLOPE: "Slope", SPI: "Stream power index (SPI)",
+  TWI: "Topographic wetness index (TWI)",
+};
+
+let RANGES = {};
+let ORDER = [];
+
+async function loadRanges(){
+  const res = await fetch('/api/feature_ranges');
+  const data = await res.json();
+  ORDER = data.order;
+  RANGES = data.ranges;
+
+  const container = document.getElementById('featureFields');
+  container.innerHTML = ORDER.map(col => {
+    const r = RANGES[col];
+    return `
+      <div class="field">
+        <label>${FEATURE_LABELS[col] || col} <span class="range">${r.min}–${r.max}</span></label>
+        <input type="number" step="any" id="f_${col}" data-col="${col}" min="${r.min}" max="${r.max}" placeholder="${r.min}–${r.max}">
+        <div class="field-error" id="err_${col}"></div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('rangeStatus').textContent = '';
+  document.getElementById('predictBtn').disabled = false;
+
+  container.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', () => validateField(inp));
+  });
+}
+
+function validateField(inp){
+  const col = inp.dataset.col;
+  const r = RANGES[col];
+  const errEl = document.getElementById(`err_${col}`);
+  const val = parseFloat(inp.value);
+  if (inp.value.trim() === ''){
+    inp.classList.remove('invalid'); errEl.classList.remove('show');
+    return null;
+  }
+  if (isNaN(val) || val < r.min || val > r.max){
+    inp.classList.add('invalid');
+    errEl.textContent = `Enter a value between ${r.min} and ${r.max}.`;
+    errEl.classList.add('show');
+    return false;
+  }
+  inp.classList.remove('invalid'); errEl.classList.remove('show');
+  return true;
+}
+
+function setMarker(lat, lon, prediction){
+  if (queryMarker) map.removeLayer(queryMarker);
+  const color = prediction === 1 ? '#5fb88a' : '#c9663f';
+  queryMarker = L.circleMarker([lat, lon], {
+    radius: 11, color: '#fbf8f0', weight: 2, fillColor: color, fillOpacity: 0.9
+  }).addTo(map);
+  map.setView([lat, lon], 11);
+}
+
+function renderResult(data){
+  const box = document.getElementById('result');
+  if (data.error){
+    box.innerHTML = `<div class="empty">${data.error}</div>`;
+    return;
+  }
+  const good = data.prediction === 1;
+  const html = data.reasoning
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  const sourceBadge = data.reasoning_source === 'huggingface'
+    ? `<span class="badge src">LLM: ${data.reasoning_model}</span>`
+    : `<span class="badge src">template reasoning</span>`;
+
+  box.innerHTML = `
+    <div class="verdict">
+      <span class="badge ${good ? 'good' : 'bad'}">${data.prediction_label}</span>
+      ${sourceBadge}
+    </div>
+    <div class="prob">${(data.probability*100).toFixed(1)}<small>% probability</small></div>
+    <div class="meter"><span style="width:${(data.probability*100).toFixed(1)}%"></span></div>
+    <div class="place">
+      <span class="label">Closest matching surveyed location</span>
+      ${data.place_name}<br>
+      <span style="opacity:.6">${data.matched_lat.toFixed(5)}, ${data.matched_lon.toFixed(5)} · feature-match distance ${data.feature_space_match_distance}</span>
+    </div>
+    <div id="reasoning">${html}</div>
+    <p class="hint">${data.note}</p>
+  `;
+}
+
+document.getElementById('featureForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const values = {};
+  let allValid = true;
+  ORDER.forEach(col => {
+    const inp = document.getElementById(`f_${col}`);
+    const ok = validateField(inp);
+    if (ok === false || inp.value.trim() === '') allValid = false;
+    values[col] = inp.value;
+  });
+
+  if (!allValid){
+    renderResult({error: 'Fix the highlighted fields — every value must be within its allowed range.'});
+    return;
+  }
+
+  const btn = document.getElementById('predictBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Predicting…';
+
+  try {
+    const res = await fetch('/api/predict_features', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(values)
+    });
+    const data = await res.json();
+
+    if (data.errors){
+      Object.entries(data.errors).forEach(([col, msg]) => {
+        const inp = document.getElementById(`f_${col}`);
+        const errEl = document.getElementById(`err_${col}`);
+        if (inp){ inp.classList.add('invalid'); }
+        if (errEl){ errEl.textContent = msg; errEl.classList.add('show'); }
+      });
+      renderResult({error: 'Some values are out of range — see highlighted fields above.'});
+      return;
+    }
+
+    setMarker(data.matched_lat, data.matched_lon, data.prediction);
+    renderResult(data);
+  } catch (err){
+    renderResult({error: 'Could not reach the prediction service. Please try again.'});
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Predict groundwater presence';
+  }
+});
+
+async function loadGlossary(){
+  try {
+    const res = await fetch('/api/feature_info');
+    const data = await res.json();
+    const glossaryBody = document.getElementById('glossaryBody');
+    glossaryBody.innerHTML = ORDER.map(col => {
+      const info = data.features[col];
+      return `
+        <div class="glossary-item">
+          <span class="glossary-item-label">${info.label}</span>
+          <div class="glossary-item-desc">${info.description}</div>
+        </div>`;
+    }).join('');
+  } catch (e){
+    console.error('Failed to load glossary:', e);
+  }
+}
+
+document.getElementById('glossaryToggle').addEventListener('click', () => {
+  const body = document.getElementById('glossaryBody');
+  const arrow = document.getElementById('glossaryArrow');
+  if (body.style.display === 'none'){
+    body.style.display = 'block';
+    arrow.classList.add('open');
+  } else {
+    body.style.display = 'none';
+    arrow.classList.remove('open');
+  }
+});
+
+loadRanges();
+loadGlossary();
+</script>
+</body>
+</html>

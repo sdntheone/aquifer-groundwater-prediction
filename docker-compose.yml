@@ -1,0 +1,72 @@
+# docker-compose.yml
+# ==================
+# Defines two services:
+#   1. db  — PostgreSQL 16 container (persistent volume so data survives restarts)
+#   2. app — Flask app container (built from Dockerfile)
+#
+# Usage:
+#   Start everything : docker-compose up --build
+#   Stop everything  : docker-compose down
+#   Stop + wipe DB   : docker-compose down -v   (drops the volume too)
+#   Just the DB      : docker-compose up db
+#                      (useful during local dev — run Flask separately)
+#
+# Environment variables for the app are read from .env file.
+# Never commit real credentials — .env is in .gitignore.
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL database ───────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine        # alpine = smaller image, same functionality
+    container_name: aquifer_db
+    restart: unless-stopped          # auto-restart if container crashes
+    environment:
+      POSTGRES_DB:       aquifer
+      POSTGRES_USER:     aquifer_user
+      POSTGRES_PASSWORD: aquifer_pass
+    ports:
+      - "5432:5432"                  # expose to host so you can connect via pgAdmin
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # named volume = data persists
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aquifer_user -d aquifer"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── Flask application ─────────────────────────────────────────────────────
+  app:
+    build: .                         # uses the Dockerfile in project root
+    container_name: aquifer_app
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # Database connection — uses service name 'db' as host (Docker DNS)
+      DATABASE_URL: postgresql://aquifer_user:aquifer_pass@db:5432/aquifer
+
+      # Hugging Face — set your real token in .env, not here
+      HF_API_TOKEN:  ${HF_API_TOKEN}
+      HF_MODEL:      ${HF_MODEL:-mistralai/Mistral-7B-Instruct-v0.3}
+
+      # LangSmith observability
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_API_KEY:    ${LANGCHAIN_API_KEY}
+      LANGCHAIN_PROJECT:    ${LANGCHAIN_PROJECT:-aquifer-groundwater}
+
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
+      PORT:       5000
+    depends_on:
+      db:
+        condition: service_healthy   # wait for Postgres healthcheck to pass
+    volumes:
+      - .:/app                       # mount source code for live reload in dev
+
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local

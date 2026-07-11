@@ -20,3 +20,4 @@ langsmith>=0.1.77          # Observability — traces every agent run end-to-end
 
 # ── External API calls ──────────────────────────────────────────────────────
 requests>=2.32.3      # HTTP client — calls Hugging Face Inference API + Nominatim geocoding
+psycopg2-binary>=2.9.9 

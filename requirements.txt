@@ -1,7 +1,22 @@
-flask==3.0.3
-gunicorn==22.0.0
-pandas>=2.2.3
-numpy>=1.26.4
-scikit-learn>=1.5.0
-joblib>=1.4.2
-openpyxl==3.1.5
+# ── Core web framework ──────────────────────────────────────────────────────
+flask==3.0.3          # Web framework — serves the UI and REST API
+gunicorn==22.0.0      # Production WSGI server (replaces Flask dev server on Render)
+
+# ── Data & ML ───────────────────────────────────────────────────────────────
+pandas==2.2.2         # Data loading and manipulation (Excel files, DataFrames)
+numpy==1.26.4         # Numerical operations (array math, SHAP output processing)
+scikit-learn==1.5.0   # RandomForest model, StandardScaler, NearestNeighbors
+joblib==1.4.2         # Serialize/deserialize model and SHAP explainer to disk
+openpyxl==3.1.5       # Read .xlsx files (required by pandas for Excel support)
+
+# ── Explainability ──────────────────────────────────────────────────────────
+shap==0.45.0          # SHAP TreeExplainer — per-prediction feature attributions
+
+# ── Agentic AI / LangGraph ──────────────────────────────────────────────────
+langgraph==0.1.19          # Orchestrates the multi-agent graph (Investigator + Communicator)
+langchain==0.2.6           # Core LangChain primitives used by LangGraph
+langchain-community==0.2.6 # Community integrations (used by langchain internally)
+langsmith==0.1.77          # Observability — traces every agent run end-to-end
+
+# ── External API calls ──────────────────────────────────────────────────────
+requests==2.32.3      # HTTP client — calls Hugging Face Inference API + Nominatim geocoding

@@ -3,58 +3,63 @@ agent.py
 ========
 Multi-agent LangGraph system for groundwater site investigation.
 
+This is the core agentic component of the application. It is called by
+main.py (FastAPI) via run_investigation() — that is the only public
+entry point. Everything else is internal implementation.
+
 Architecture:
-    ┌─────────────────────────────────────────────┐
-    │            Investigator Agent                │
-    │                                             │
-    │  Has access to 4 tools. Decides which       │
-    │  tools to call based on what it finds       │
-    │  in the feature values — not a fixed        │
-    │  sequence. This is what makes it agentic.   │
-    │                                             │
-    │  Tool 1: run_prediction()                   │
-    │  Tool 2: get_shap_values()                  │
-    │  Tool 3: get_feature_context()              │
-    │  Tool 4: check_sensitivity()                │
-    │                                             │
-    │  Output: structured investigation report    │
-    └──────────────────┬──────────────────────────┘
-                       │ hands off report
+    ┌─────────────────────────────────────────────────┐
+    │              Investigator Agent                  │
+    │                                                 │
+    │  Decides which tools to call based on what      │
+    │  it finds — not a fixed sequence. This          │
+    │  conditional, data-driven tool selection        │
+    │  is what makes the system genuinely agentic.    │
+    │                                                 │
+    │  Tool 1: run_prediction()                       │
+    │      Always called — need prediction first.     │
+    │                                                 │
+    │  Tool 2: get_shap_values()                      │
+    │      Always called — per-prediction attribution │
+    │                                                 │
+    │  Tool 3: get_feature_context()                  │
+    │      Called for top 3 importance features.      │
+    │                                                 │
+    │  Tool 4: check_sensitivity()                    │
+    │      Called conditionally:                      │
+    │        - Always for #1 importance feature       │
+    │        - For conflicting features               │
+    │        - For top SHAP features if borderline    │
+    │                                                 │
+    │  Output: structured investigation report        │
+    └──────────────────┬──────────────────────────────┘
+                       │
                        ▼
-    ┌─────────────────────────────────────────────┐
-    │            Communicator Agent                │
-    │                                             │
-    │  Receives investigation report +            │
-    │  session memory + long-term stats.          │
-    │  Calls llm_reasoning.py to generate         │
-    │  the final user-facing explanation.         │
-    └─────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────┐
+    │              Communicator Agent                  │
+    │                                                 │
+    │  Receives investigation report + session        │
+    │  memory + aggregate stats.                      │
+    │  Calls llm_reasoning.generate_llm_reasoning()   │
+    │  to produce the final explanation.              │
+    └─────────────────────────────────────────────────┘
 
-Memory layers:
-    Working memory  — InvestigationState dict (LangGraph state)
-                      tracks every tool call and finding within
-                      a single investigation run
-    Session memory  — passed in from memory_store.py
-    Long-term memory — passed in from memory_store.py
+Memory layers used:
+    Working memory  — InvestigationState (LangGraph state dict)
+                      Accumulates every tool call and finding.
+    Session memory  — passed in from memory_store.get_session_summary()
+    Long-term memory — passed in from memory_store.get_aggregate_stats()
 
-Observability (LangSmith):
-    Set these environment variables — no code changes needed:
+LangSmith observability:
+    Set in environment — no code changes needed:
         LANGCHAIN_TRACING_V2=true
-        LANGCHAIN_API_KEY=your_key_here
+        LANGCHAIN_API_KEY=your_key
         LANGCHAIN_PROJECT=aquifer-groundwater
-    Every graph invocation is then traced automatically including
-    node names, inputs/outputs, latency, and token usage.
+    Every graph invocation is traced: node names, tool I/O, latency,
+    token usage. Visible at smith.langchain.com.
 
-Usage:
-    from agent import run_investigation
-
-    result = run_investigation(
-        feature_values  = {"ELEVATION": 2, "RAINFALL": 3, ...},
-        session_id      = "abc-123",
-        session_summary = {...},   # from memory_store
-        agg_stats       = {...},   # from memory_store
-        place_name      = "Jhansi, Uttar Pradesh",
-    )
+Imported by:
+    main.py → from agent import run_investigation
 """
 
 import json
@@ -74,80 +79,82 @@ from reasoning import (
     _level,
 )
 from llm_reasoning import generate_llm_reasoning
-from train import normalise_shap   # reuse the same shape-normalisation logic
+from train import normalise_shap
 
 # ── Load model artifacts once at module import ────────────────────────────────
-# Loaded here rather than in each tool call — avoids re-reading from disk
-# on every request which would be slow.
+# Loading here (not inside tool functions) means disk reads happen once
+# at server startup, not on every request.
 BASE      = Path(__file__).parent
 MODEL_DIR = BASE / "model"
 
 _model     = joblib.load(MODEL_DIR / "rf_model.joblib")
 _explainer = joblib.load(MODEL_DIR / "shap_explainer.joblib")
-FEATURE_COLS = json.loads((MODEL_DIR / "feature_columns.json").read_text())
+FEATURE_COLS = json.loads(
+    (MODEL_DIR / "feature_columns.json").read_text()
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LANGGRAPH STATE — Working Memory
+# LANGGRAPH STATE — Working Memory Layer
 # ══════════════════════════════════════════════════════════════════════════════
 
 class InvestigationState(TypedDict):
     """
-    The shared state object passed between all nodes in the LangGraph.
-    This IS the working memory of the agent system.
+    Shared state dict passed between all LangGraph nodes.
+    This is the working memory of the agent system.
 
-    LangGraph passes this dict from node to node, each node reads what
-    it needs and returns a partial dict of updates — LangGraph merges
-    them automatically.
+    LangGraph passes this from node to node. Each node reads what it
+    needs and returns a PARTIAL dict of updates. LangGraph merges
+    updates into the full state automatically.
 
-    Fields marked Annotated[list, operator.add] use LangGraph's
-    reducer pattern: instead of replacing the list, new items are
-    appended to it. This is how investigation_notes accumulates
-    a trace of every step without each node needing to read the
-    current list first.
+    Fields with Annotated[list, operator.add] use LangGraph's reducer:
+    new items returned by any node are APPENDED to the existing list,
+    not replaced. This is how investigation_notes builds a cumulative
+    trace across both agent nodes without explicit read-before-write.
     """
 
-    # ── Inputs (set before graph starts) ─────────────────────────────────
-    feature_values:  dict        # the 10 feature values from the user
-    session_id:      str         # Flask session ID
-    session_summary: dict | None # from memory_store (Layer 2)
-    agg_stats:       dict | None # from memory_store (Layer 3)
-    place_name:      str  | None # reverse-geocoded location name
+    # ── Inputs ────────────────────────────────────────────────────────────
+    feature_values:  dict         # 10 feature values from the user form
+    session_id:      str          # FastAPI session uuid
+    session_summary: dict | None  # Layer 2 memory from memory_store
+    agg_stats:       dict | None  # Layer 3 memory from memory_store
+    place_name:      str  | None  # reverse-geocoded location string
 
-    # ── Working memory (built up during investigation) ────────────────────
-    prediction:            int   | None  # 0 or 1 from run_prediction tool
-    probability:           float | None  # model confidence
-    shap_values:           dict  | None  # {feature: shap_value} for this input
-    sensitivity_results:   list          # list of sensitivity check dicts
-    flagged_conflicts:     list          # features with conflicting signals
-    investigation_report:  str   | None  # structured summary for Communicator
+    # ── Working memory (filled during investigation) ───────────────────────
+    prediction:            int   | None
+    probability:           float | None
+    shap_values:           dict  | None
+    sensitivity_results:   list
+    flagged_conflicts:     list
+    investigation_report:  str   | None
 
-    # Annotated with operator.add — items are appended, not replaced
-    # This gives us a full trace of every tool call made during the run
+    # Annotated with operator.add: new list items are appended, not replaced
     investigation_notes: Annotated[list, operator.add]
 
     # ── Outputs (set by Communicator Agent) ───────────────────────────────
-    final_reasoning:  str  | None  # user-facing explanation text
-    reasoning_source: str  | None  # 'huggingface', 'template', etc.
-    reasoning_model:  str  | None  # HF model ID or None
+    final_reasoning:  str  | None
+    reasoning_source: str  | None
+    reasoning_model:  str  | None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TOOLS — Called by the Investigator Agent
+# TOOLS
+# Called by the Investigator Agent node, not by LangGraph directly.
+# Regular Python functions — no decorator needed in this architecture.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_prediction(feature_values: dict) -> dict:
     """
-    Tool 1: Run the trained RandomForest model on a feature dict.
+    Tool 1: Run the trained RandomForest model.
 
-    This is always the first tool called — we need the prediction
-    and probability before deciding what else to investigate.
+    Always the first tool called — we need the prediction and probability
+    before the agent can decide what else to investigate.
 
     Args:
-        feature_values : dict of {FEATURE_COL: float}
+        feature_values : {FEATURE_COL: float}
 
     Returns:
-        dict with keys: prediction (0 or 1), probability (float)
+        {"prediction": int, "probability": float}
     """
     X     = pd.DataFrame([feature_values])[FEATURE_COLS]
     proba = float(_model.predict_proba(X)[0, 1])
@@ -157,56 +164,50 @@ def run_prediction(feature_values: dict) -> dict:
 
 def get_shap_values(feature_values: dict) -> dict:
     """
-    Tool 2: Compute SHAP values for this specific prediction.
+    Tool 2: Compute per-prediction SHAP values using TreeExplainer.
 
-    SHAP (SHapley Additive exPlanations) answers the question:
-    'For THIS particular set of feature values, how much did each
-    feature push the prediction toward groundwater present vs absent?'
+    SHAP answers: 'For THIS specific input, how much did each feature
+    push the prediction toward class 1 (groundwater present)?'
 
-    Positive SHAP = pushed toward class 1 (groundwater present)
-    Negative SHAP = pushed toward class 0 (groundwater absent)
+    Positive SHAP = pushed toward groundwater present (class 1)
+    Negative SHAP = pushed toward groundwater absent  (class 0)
 
-    We use the normalise_shap() function from train.py to handle
-    different output shapes across SHAP versions — same logic,
+    Uses normalise_shap() from train.py to handle output shape
+    differences across shap library versions — same function,
     imported rather than duplicated.
 
     Args:
-        feature_values : dict of {FEATURE_COL: float}
+        feature_values : {FEATURE_COL: float}
 
     Returns:
-        dict of {FEATURE_COL: shap_value} for the positive class
+        {FEATURE_COL: shap_value_float} for the positive class
     """
     X        = pd.DataFrame([feature_values])[FEATURE_COLS]
     raw_shap = _explainer.shap_values(X)
 
-    # normalise_shap always returns shape (n_samples, n_features)
-    shap_array = normalise_shap(
-        raw_shap,
-        n_samples=1,
-        n_features=len(FEATURE_COLS),
-    )
+    # Always returns (1, n_features) after normalisation
+    arr = normalise_shap(raw_shap, n_samples=1, n_features=len(FEATURE_COLS))
 
-    # shap_array[0] is the single row — zip with feature names
     return {
-        col: round(float(shap_array[0, i]), 4)
+        col: round(float(arr[0, i]), 4)
         for i, col in enumerate(FEATURE_COLS)
     }
 
 
 def get_feature_context(feature_name: str, value: float) -> dict:
     """
-    Tool 3: Return where a feature value sits in the training distribution.
+    Tool 3: Return distribution context for one feature value.
 
-    Used by the Investigator Agent to understand whether a value is
-    unusual relative to what the model was trained on, and to look up
-    the feature's global importance rank and favorable direction.
+    Tells the agent whether the submitted value is low/medium/high
+    relative to the training data, and what direction is favourable
+    for groundwater. Used to detect conflicts with SHAP direction.
 
     Args:
         feature_name : one of the 10 FEATURE_COLS
-        value        : the user-submitted value for this feature
+        value        : user-submitted value
 
     Returns:
-        dict with distribution stats, level, importance rank,
+        Dict with distribution stats, level, importance rank,
         favorable direction, and plain-English description
     """
     if feature_name not in FEATURE_STATS:
@@ -215,23 +216,21 @@ def get_feature_context(feature_name: str, value: float) -> dict:
     stats    = FEATURE_STATS[feature_name]
     info     = FEATURE_INFO.get(feature_name, {})
     level    = _level(feature_name, value)
-
-    # importance rank: 1 = most important globally
     imp_keys = list(FEATURE_IMPORTANCE.keys())
     rank     = imp_keys.index(feature_name) + 1 if feature_name in imp_keys else None
 
     return {
-        "feature":            feature_name,
-        "label":              info.get("label", feature_name),
-        "value":              value,
-        "level":              level,          # 'low', 'medium', 'high'
-        "mean":               stats["mean"],
-        "std":                stats["std"],
-        "min":                stats["min"],
-        "max":                stats["max"],
-        "importance_rank":    rank,
-        "favorable_direction":info.get("favorable", "context"),
-        "description":        info.get("description", ""),
+        "feature":             feature_name,
+        "label":               info.get("label", feature_name),
+        "value":               value,
+        "level":               level,
+        "mean":                stats["mean"],
+        "std":                 stats["std"],
+        "min":                 stats["min"],
+        "max":                 stats["max"],
+        "importance_rank":     rank,
+        "favorable_direction": info.get("favorable", "context"),
+        "description":         info.get("description", ""),
     }
 
 
@@ -243,53 +242,50 @@ def check_sensitivity(
     """
     Tool 4: Nudge one feature by delta class steps and rerun the model.
 
-    This answers the question: 'How much would the prediction change
-    if this feature were slightly different?' — a what-if analysis
-    that gives the user actionable insight.
+    Answers: 'How much would the prediction change if this feature
+    were slightly different?' This is a conditional what-if analysis.
 
-    Example: if DRAINAGE is 4 (high, unfavorable) and we nudge it to 3,
-    does the probability jump significantly? If yes, drainage density
-    is a critical swing factor for this site.
+    Called selectively (not for every feature) to keep latency low.
+    Each call runs the model twice (original + modified).
 
-    delta is typically +1 or -1 (one class step).
-    The result is clipped to [min, max] from training data so we never
-    ask the model to predict outside its training range.
+    Clipped to [min, max] so we never ask the model to predict outside
+    its training range.
 
     Args:
-        feature_values : original user inputs
+        feature_values : original feature dict
         feature_name   : which feature to nudge
-        delta          : how many class steps to move (+1 or -1)
+        delta          : class steps to move (typically +1 or -1)
 
     Returns:
-        dict with original_val, new_val, original_prob, new_prob,
-        and impact (new_prob - original_prob)
+        Dict with original_val, new_val, original_prob, new_prob, impact
     """
     if feature_name not in feature_values:
         return {"error": f"{feature_name} not in feature_values"}
 
     stats        = FEATURE_STATS[feature_name]
     original_val = feature_values[feature_name]
+    new_val      = max(
+        stats["min"],
+        min(stats["max"], original_val + delta)
+    )
 
-    # Clip so we don't go outside the trained range
-    new_val = max(stats["min"], min(stats["max"], original_val + delta))
-
-    # Run model with the nudged value
-    modified     = {**feature_values, feature_name: new_val}
     original_res = run_prediction(feature_values)
-    modified_res = run_prediction(modified)
+    modified_res = run_prediction(
+        {**feature_values, feature_name: new_val}
+    )
 
     return {
-        "feature":      feature_name,
-        "original_val": original_val,
-        "new_val":      new_val,
-        "delta":        delta,
-        "original_prob":original_res["probability"],
-        "new_prob":     modified_res["probability"],
-        "impact":       round(
-                            modified_res["probability"]
-                            - original_res["probability"],
-                            4
-                        ),
+        "feature":       feature_name,
+        "original_val":  original_val,
+        "new_val":       new_val,
+        "delta":         delta,
+        "original_prob": original_res["probability"],
+        "new_prob":      modified_res["probability"],
+        "impact":        round(
+                             modified_res["probability"]
+                             - original_res["probability"],
+                             4
+                         ),
     }
 
 
@@ -299,59 +295,60 @@ def check_sensitivity(
 
 def investigator_node(state: InvestigationState) -> dict:
     """
-    Investigator Agent — plans and executes a multi-step analysis.
+    Investigator Agent — plans and executes multi-step site analysis.
 
-    This node embodies the 'agentic' behaviour: it doesn't follow a
-    fixed script. Instead, it reads what it finds at each step and
-    decides what to investigate next.
+    This node embodies the agentic behaviour: it does not follow a
+    fixed script. It reads findings at each step and decides what
+    to investigate next. The path through the tools varies with input.
 
-    Decision logic:
-        Step 1: Always call run_prediction (need this before anything else)
-        Step 2: Always call get_shap_values (need per-prediction attributions)
-        Step 3: Always call get_feature_context on top 3 importance features
-        Step 4: Detect conflicts between SHAP direction and feature level
-        Step 5: Conditionally call check_sensitivity —
-                  - Always on the #1 global importance feature
-                  - On conflicting features (to quantify the conflict)
-                  - On top SHAP features if prediction is borderline (40-65%)
-        Step 6: Build structured investigation report for Communicator Agent
+    Step-by-step decision logic:
+        1. run_prediction       — always (need prediction first)
+        2. get_shap_values      — always (per-prediction attribution)
+        3. get_feature_context  — always for top 3 importance features
+        4. Conflict detection   — derived from Steps 2+3, no tool call
+        5. check_sensitivity    — CONDITIONAL:
+             · always for #1 globally important feature
+             · for features identified as conflicting (up to 2)
+             · for top SHAP features if prediction is borderline (40-65%)
+             · capped at 3 total checks to control latency
+        6. Build investigation report for Communicator Agent
 
-    Everything is logged to investigation_notes so the full trace
-    is visible in the UI (Agent Trace tab) and in LangSmith.
+    Everything is logged to investigation_notes so the frontend's
+    Agent Trace tab shows exactly what happened, and LangSmith
+    captures the full trace if configured.
 
     Args:
-        state : InvestigationState dict from LangGraph
+        state : InvestigationState from LangGraph
 
     Returns:
-        Partial state dict — LangGraph merges this into the full state
+        Partial state dict — LangGraph merges into full state
     """
     fv    = state["feature_values"]
-    notes = []   # will become investigation_notes via Annotated[list, add]
+    notes = []
 
-    # ── Step 1: Run prediction ────────────────────────────────────────────
-    pred_result = run_prediction(fv)
-    prediction  = pred_result["prediction"]
-    probability = pred_result["probability"]
+    # ── Step 1: Predict ───────────────────────────────────────────────────
+    pred_res    = run_prediction(fv)
+    prediction  = pred_res["prediction"]
+    probability = pred_res["probability"]
     notes.append(
         f"[Tool 1: run_prediction] → "
         f"prediction={prediction}, probability={probability:.4f}"
     )
 
     # ── Step 2: SHAP values ───────────────────────────────────────────────
-    shap_vals = get_shap_values(fv)
+    shap_vals    = get_shap_values(fv)
     top_shap_col = max(shap_vals, key=lambda k: abs(shap_vals[k]))
     notes.append(
         f"[Tool 2: get_shap_values] → "
-        f"top SHAP driver: {top_shap_col} "
+        f"top driver: {top_shap_col} "
         f"(SHAP={shap_vals[top_shap_col]:+.3f})"
     )
 
-    # ── Step 3: Feature context for top 3 by global importance ───────────
-    top_importance_cols = list(FEATURE_IMPORTANCE.keys())[:3]
+    # ── Step 3: Feature context (top 3 by global importance) ──────────────
+    top_cols    = list(FEATURE_IMPORTANCE.keys())[:3]
     feature_ctx = {
         col: get_feature_context(col, fv[col])
-        for col in top_importance_cols
-        if col in fv
+        for col in top_cols if col in fv
     }
     notes.append(
         f"[Tool 3: get_feature_context] → "
@@ -359,56 +356,48 @@ def investigator_node(state: InvestigationState) -> dict:
     )
 
     # ── Step 4: Conflict detection ────────────────────────────────────────
-    # A conflict means a feature's SHAP direction disagrees with its
-    # known favorable direction — unusual pattern worth flagging.
-    #
-    # Example conflict: RAINFALL is LOW (unfavorable for groundwater)
-    # but its SHAP value is positive (pushed prediction toward present).
-    # This could mean nearby features are compensating, or the model
-    # has learned a non-obvious interaction.
+    # Conflict = SHAP direction disagrees with known favorable direction.
+    # Example: RAINFALL is LOW (usually unfavorable) but SHAP is positive
+    # (pushed toward groundwater present). Interesting — something else
+    # might be compensating.
     conflicts = []
     for col, ctx in feature_ctx.items():
-        favorable = ctx.get("favorable_direction")
-        level     = ctx.get("level")
-        shap_sign = shap_vals.get(col, 0)
-        label     = ctx.get("label", col)
+        favorable  = ctx.get("favorable_direction")
+        level      = ctx.get("level")
+        shap_sign  = shap_vals.get(col, 0)
+        label      = ctx.get("label", col)
 
-        # Feature that should be high is low but SHAP is still positive
         if favorable == "high" and level == "low" and shap_sign > 0.05:
             conflicts.append(
-                f"{label} is LOW (usually unfavorable) but its SHAP is "
+                f"{label} is LOW (usually unfavorable) but SHAP is "
                 f"positive — other features may be compensating"
             )
-        # Feature that should be low is high and SHAP confirms it hurts
         elif favorable == "low" and level == "high" and shap_sign < -0.05:
             conflicts.append(
                 f"{label} is HIGH (unfavorable direction) and SHAP "
                 f"confirms it is reducing groundwater likelihood"
             )
-        # Feature that should be high is high but SHAP is negative — unusual
         elif favorable == "high" and level == "high" and shap_sign < -0.05:
             conflicts.append(
-                f"{label} is HIGH (usually favorable) but SHAP shows it "
-                f"is negative — unusual combination worth noting"
+                f"{label} is HIGH (usually favorable) but SHAP is "
+                f"negative — unusual combination worth noting"
             )
 
     notes.append(
         f"[Conflict detection] → "
-        f"{len(conflicts)} conflict(s) found"
+        f"{len(conflicts)} conflict(s)"
         + (f": {conflicts[0]}" if conflicts else "")
     )
 
     # ── Step 5: Conditional sensitivity checks ────────────────────────────
-    # Build the list of features to probe. Cap at 3 total checks to keep
-    # latency reasonable — each check reruns the model twice.
-    is_borderline        = 0.38 <= probability <= 0.65
-    features_to_probe    = []
+    is_borderline       = 0.38 <= probability <= 0.65
+    features_to_probe   = []
 
-    # Always probe the globally most important feature
-    top_importance_col = list(FEATURE_IMPORTANCE.keys())[0]
-    features_to_probe.append(top_importance_col)
+    # Always probe the #1 globally important feature
+    top1 = list(FEATURE_IMPORTANCE.keys())[0]
+    features_to_probe.append(top1)
 
-    # Add conflicting features (up to 2)
+    # Add conflicting features (extract feature name from conflict string)
     for conflict_str in conflicts[:2]:
         for col in FEATURE_COLS:
             label = FEATURE_INFO.get(col, {}).get("label", col)
@@ -427,27 +416,22 @@ def investigator_node(state: InvestigationState) -> dict:
             if col not in features_to_probe:
                 features_to_probe.append(col)
 
-    # Cap at 3, run sensitivity checks
+    # Run sensitivity checks (capped at 3)
     sensitivity_results = []
     for col in features_to_probe[:3]:
-        # Probe in the direction that would improve the prediction
-        # (toward 1 if currently 0, toward 0 if currently 1)
+        # Probe toward the "improving" direction
         delta  = 1 if prediction == 0 else -1
         result = check_sensitivity(fv, col, delta)
         sensitivity_results.append(result)
-
-        impact_pct = result["impact"] * 100
+        impact = result["impact"] * 100
         notes.append(
             f"[Tool 4: check_sensitivity] "
             f"{col}: {result['original_val']}→{result['new_val']}, "
-            f"probability {'↑' if result['impact']>0 else '↓'}"
-            f"{abs(impact_pct):.1f}pp"
+            f"impact {'↑' if result['impact']>0 else '↓'}"
+            f"{abs(impact):.1f}pp"
         )
 
     # ── Step 6: Build investigation report ───────────────────────────────
-    # This report is what the Communicator Agent receives.
-    # It's structured text — not user-facing, but needs to be clear
-    # enough for the LLM to extract the key insights from it.
     top_shap_sorted = sorted(
         shap_vals.items(),
         key=lambda kv: abs(kv[1]),
@@ -460,22 +444,22 @@ def investigator_node(state: InvestigationState) -> dict:
 
     sens_summary = ""
     for s in sensitivity_results:
-        if abs(s.get("impact", 0)) >= 0.03:   # only mention meaningful changes
-            label = FEATURE_INFO.get(s["feature"], {}).get("label", s["feature"])
+        if abs(s.get("impact", 0)) >= 0.03:
+            label = FEATURE_INFO.get(
+                s["feature"], {}
+            ).get("label", s["feature"])
             sens_summary += (
-                f"If {label} changed from class {s['original_val']:.0f} "
-                f"to {s['new_val']:.0f}, probability would shift "
-                f"{s['impact']*100:+.1f}pp "
+                f"If {label} changed {s['original_val']:.0f}→{s['new_val']:.0f}, "
+                f"probability shifts {s['impact']*100:+.1f}pp "
                 f"(to {s['new_prob']*100:.1f}%). "
             )
 
     conflict_summary = (
-        " Conflicts: " + "; ".join(conflicts)
-        if conflicts else ""
+        " Conflicts: " + "; ".join(conflicts) if conflicts else ""
     )
 
-    is_borderline_note = (
-        " Note: prediction is borderline — small feature changes "
+    borderline_note = (
+        " NOTE: prediction is borderline — small feature changes "
         "could flip the outcome."
         if is_borderline else ""
     )
@@ -486,14 +470,15 @@ def investigator_node(state: InvestigationState) -> dict:
         f"(probability={probability*100:.1f}%).\n"
         f"TOP SHAP DRIVERS: {shap_summary}.\n"
         f"SENSITIVITY: "
-        f"{sens_summary or 'Prediction is robust to small feature changes.'}"
+        f"{sens_summary or 'Prediction robust to small feature changes.'}"
         f"{conflict_summary}"
-        f"{is_borderline_note}"
+        f"{borderline_note}"
     )
 
-    notes.append(f"[Investigator] Report built — handing off to Communicator")
+    notes.append(
+        "[Investigator] Report built — handing off to Communicator Agent"
+    )
 
-    # Return partial state — LangGraph merges this into InvestigationState
     return {
         "prediction":           prediction,
         "probability":          probability,
@@ -513,26 +498,26 @@ def communicator_node(state: InvestigationState) -> dict:
     """
     Communicator Agent — generates the final user-facing explanation.
 
-    Receives the full InvestigationState including:
-        - The structured investigation report from the Investigator Agent
-        - SHAP values for this specific prediction
-        - Session memory (previous sites the user checked)
-        - Long-term aggregate stats from PostgreSQL
+    Receives the full InvestigationState after the Investigator has run,
+    including the structured report, SHAP values, session memory, and
+    long-term aggregate stats.
 
-    Passes all of this to llm_reasoning.generate_llm_reasoning() which
-    tries the Hugging Face API first and falls back to the template engine.
+    Calls llm_reasoning.generate_llm_reasoning() which tries Hugging Face
+    first and falls back to the template engine automatically.
 
-    This separation of concerns is intentional:
-        Investigator = analytical reasoning (numbers, tool calls, patterns)
-        Communicator = linguistic reasoning (clear prose for a non-expert)
-    Mixing these in one agent produces worse output for both tasks.
+    Why two separate agents instead of one?
+        Investigator = analytical (numbers, tool calls, pattern detection)
+        Communicator = linguistic (clear prose for a non-expert reader)
+        Mixing both concerns in one agent consistently produces worse
+        output for both tasks. Separation of concerns applies to agents
+        just as it does to software components.
 
     Args:
-        state : full InvestigationState after Investigator has run
+        state : full InvestigationState after investigator_node has run
 
     Returns:
         Partial state dict with final_reasoning, reasoning_source,
-        reasoning_model, and one more investigation_notes entry
+        reasoning_model, and one appended investigation_notes entry
     """
     result = generate_llm_reasoning(
         feature_values       = state["feature_values"],
@@ -545,51 +530,49 @@ def communicator_node(state: InvestigationState) -> dict:
         agg_stats            = state.get("agg_stats"),
     )
 
+    source_note = result["source"]
+    if result.get("fallback_reason"):
+        source_note += f" (fallback: {result['fallback_reason'][:80]})"
+
     return {
         "final_reasoning":  result["text"],
         "reasoning_source": result["source"],
         "reasoning_model":  result.get("model"),
         "investigation_notes": [
-            f"[Communicator] Explanation generated "
-            f"via {result['source']}"
-            + (
-                f" — fallback reason: {result['fallback_reason']}"
-                if result.get("fallback_reason") else ""
-            )
+            f"[Communicator] Explanation generated via {source_note}"
         ],
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LANGGRAPH — Build and compile the graph
+# LANGGRAPH — Graph assembly
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_graph():
     """
-    Assemble the two-node LangGraph.
+    Assemble and compile the two-node LangGraph.
 
-    Graph structure:
+    Graph structure (linear):
         START → investigator_node → communicator_node → END
 
-    This is a linear graph (no branching) because the Investigator
-    always runs before the Communicator — there's no condition where
-    we'd skip the investigation. Branching would be added if we wanted
-    to short-circuit (e.g. skip sensitivity checks for very high-confidence
-    predictions) — a natural next evolution of this system.
+    Linear because the Investigator always runs before the Communicator
+    — there is no condition under which we skip the investigation step.
 
-    compile() returns a CompiledGraph that behaves like a callable:
+    Branching could be added later to short-circuit on very high
+    confidence predictions (skip sensitivity checks when p > 0.95) or
+    to route to different Communicator prompts based on confidence level.
+
+    compile() returns a CompiledGraph callable:
         final_state = graph.invoke(initial_state)
 
-    LangSmith tracing is automatically applied to the compiled graph
-    if LANGCHAIN_TRACING_V2=true is set in the environment.
+    LangSmith traces this automatically when
+    LANGCHAIN_TRACING_V2=true is set in the environment.
     """
     graph = StateGraph(InvestigationState)
 
-    # Register nodes
-    graph.add_node("investigator",  investigator_node)
-    graph.add_node("communicator",  communicator_node)
+    graph.add_node("investigator", investigator_node)
+    graph.add_node("communicator", communicator_node)
 
-    # Define edges
     graph.set_entry_point("investigator")
     graph.add_edge("investigator", "communicator")
     graph.add_edge("communicator", END)
@@ -597,17 +580,17 @@ def build_graph():
     return graph.compile()
 
 
-# Compile once at module import — reused for every request
+# Compile once at module import — reused for all requests
 _graph = build_graph()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PUBLIC ENTRY POINT — called by app.py
+# PUBLIC ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_investigation(
     feature_values:  dict,
-    session_id:      str        = "default",
+    session_id:      str         = "default",
     session_summary: dict | None = None,
     agg_stats:       dict | None = None,
     place_name:      str  | None = None,
@@ -615,38 +598,36 @@ def run_investigation(
     """
     Run the full two-agent investigation for a set of feature values.
 
-    This is the only function app.py needs to import from this module.
-    Everything else (tools, nodes, graph) is internal implementation.
+    This is the ONLY function main.py imports from this module.
+    Tools, nodes, and the graph are all internal implementation details.
 
     Args:
-        feature_values  : dict of {FEATURE_COL: float} — validated user inputs
-        session_id      : Flask session uuid for working memory tracking
-        session_summary : output of memory_store.get_session_summary()
-        agg_stats       : output of memory_store.get_aggregate_stats()
-        place_name      : reverse-geocoded place name or None
+        feature_values  : validated {FEATURE_COL: float} dict from main.py
+        session_id      : FastAPI session uuid for memory tracking
+        session_summary : from memory_store.get_session_summary()
+        agg_stats       : from memory_store.get_aggregate_stats()
+        place_name      : reverse-geocoded string or None
 
     Returns:
-        dict with all investigation outputs:
+        Dict with all outputs the API endpoint needs:
             prediction           — 0 or 1
-            probability          — float
-            shap_values          — {feature: shap_value}
-            sensitivity_results  — list of sensitivity check dicts
-            flagged_conflicts    — list of conflict description strings
+            probability          — float 0.0-1.0
+            shap_values          — {feature: shap_float}
+            sensitivity_results  — list of sensitivity dicts
+            flagged_conflicts    — list of conflict strings
             investigation_notes  — full agent trace (list of strings)
-            investigation_report — structured report (Investigator → Communicator)
-            final_reasoning      — user-facing explanation text
-            reasoning_source     — 'huggingface', 'template', or 'template_fallback'
-            reasoning_model      — HF model ID or None
+            investigation_report — structured text (Investigator → Communicator)
+            final_reasoning      — user-facing explanation (markdown)
+            reasoning_source     — 'huggingface', 'template', 'template_fallback'
+            reasoning_model      — HF model ID string or None
     """
-    # Build the initial state — this is where working memory starts
     initial_state: InvestigationState = {
         "feature_values":       feature_values,
         "session_id":           session_id,
         "session_summary":      session_summary,
         "agg_stats":            agg_stats,
         "place_name":           place_name,
-
-        # These are all None/empty at the start — filled by the agents
+        # Everything below starts empty — filled by the agents
         "prediction":           None,
         "probability":          None,
         "shap_values":          None,
@@ -659,10 +640,8 @@ def run_investigation(
         "reasoning_model":      None,
     }
 
-    # invoke() runs the full graph synchronously and returns final state
     final_state = _graph.invoke(initial_state)
 
-    # Return only what app.py needs — don't expose internal state keys
     return {
         "prediction":           final_state["prediction"],
         "probability":          final_state["probability"],

@@ -1,72 +1,76 @@
 # docker-compose.yml
 # ==================
 # Defines two services:
-#   1. db  — PostgreSQL 16 container (persistent volume so data survives restarts)
-#   2. app — Flask app container (built from Dockerfile)
+#   db  — PostgreSQL 16 (persistent named volume)
+#   app — FastAPI application (built from Dockerfile)
 #
-# Usage:
-#   Start everything : docker-compose up --build
-#   Stop everything  : docker-compose down
-#   Stop + wipe DB   : docker-compose down -v   (drops the volume too)
-#   Just the DB      : docker-compose up db
-#                      (useful during local dev — run Flask separately)
+# Common commands:
+#   Start everything    : docker-compose up --build
+#   Start DB only       : docker-compose up db -d
+#   Stop everything     : docker-compose down
+#   Stop and wipe DB    : docker-compose down -v
+#   App shell           : docker-compose exec app bash
+#   DB shell            : docker-compose exec db psql -U aquifer_user -d aquifer
 #
-# Environment variables for the app are read from .env file.
-# Never commit real credentials — .env is in .gitignore.
+# Environment variables are read from .env (see .env.example).
+# Never commit .env — it contains real credentials.
 
 version: "3.9"
 
 services:
 
-  # ── PostgreSQL database ───────────────────────────────────────────────────
+  # ── PostgreSQL 16 ─────────────────────────────────────────────────────────
   db:
-    image: postgres:16-alpine        # alpine = smaller image, same functionality
+    image: postgres:16-alpine
     container_name: aquifer_db
-    restart: unless-stopped          # auto-restart if container crashes
+    restart: unless-stopped
     environment:
       POSTGRES_DB:       aquifer
       POSTGRES_USER:     aquifer_user
       POSTGRES_PASSWORD: aquifer_pass
     ports:
-      - "5432:5432"                  # expose to host so you can connect via pgAdmin
+      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data   # named volume = data persists
+      # Named volume — data survives docker-compose down (but not down -v)
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aquifer_user -d aquifer"]
       interval: 10s
       timeout:  5s
       retries:  5
 
-  # ── Flask application ─────────────────────────────────────────────────────
+  # ── FastAPI Application ───────────────────────────────────────────────────
   app:
-    build: .                         # uses the Dockerfile in project root
+    build: .
     container_name: aquifer_app
     restart: unless-stopped
     ports:
       - "5000:5000"
     environment:
-      # Database connection — uses service name 'db' as host (Docker DNS)
+      # 'db' resolves to the database container via Docker's internal DNS
       DATABASE_URL: postgresql://aquifer_user:aquifer_pass@db:5432/aquifer
 
-      # Hugging Face — set your real token in .env, not here
+      # Set real values in .env — docker-compose reads it automatically
       HF_API_TOKEN:  ${HF_API_TOKEN}
       HF_MODEL:      ${HF_MODEL:-mistralai/Mistral-7B-Instruct-v0.3}
 
-      # LangSmith observability
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY:    ${LANGCHAIN_API_KEY}
       LANGCHAIN_PROJECT:    ${LANGCHAIN_PROJECT:-aquifer-groundwater}
 
       SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
       PORT:       5000
+
     depends_on:
       db:
-        condition: service_healthy   # wait for Postgres healthcheck to pass
+        # Wait for Postgres healthcheck to pass before starting the app
+        condition: service_healthy
+
     volumes:
-      - .:/app                       # mount source code for live reload in dev
+      # Mount source code so changes reflect without rebuilding
+      - .:/app
 
-
-# ── Named volumes ─────────────────────────────────────────────────────────────
+# ── Named volumes ──────────────────────────────────────────────────────────
 volumes:
   postgres_data:
     driver: local

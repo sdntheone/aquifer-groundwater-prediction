@@ -4,26 +4,31 @@ reasoning.py
 Two responsibilities:
 
     1. FEATURE_INFO dict
-       Metadata for all 10 input features — label, plain-English description,
-       which direction is favourable for groundwater, and per-direction
-       explanation strings used in bullet points.
+       Metadata for all 10 input features.
+       Each entry has: label, description, favorable direction,
+       and per-direction explanation strings.
+
        Imported by:
-           app.py          → /api/feature_info endpoint (glossary)
-           llm_reasoning.py → injected into LLM prompt as context
-           agent.py         → get_feature_context tool
+           main.py          → /api/feature_info endpoint (glossary on Page 1)
+           llm_reasoning.py → injected into the LLM prompt as context
+           agent.py         → get_feature_context() tool
 
     2. generate_reasoning()
        Deterministic template-based explanation engine.
-       Used as the fallback when no HF_API_TOKEN is configured,
-       or when the Hugging Face API call fails.
-       Accepts optional SHAP values so bullet points can reference
-       per-prediction feature attributions rather than just global importance.
+       Returns a markdown-formatted string.
 
-Why keep this alongside the LLM?
-    The LLM can fail (rate limit, network, token expired).
-    This engine never fails — it runs entirely locally with no dependencies
-    beyond what's already loaded. The app degrades gracefully instead of
-    returning an error to the user.
+       Used as fallback when:
+           - HF_API_TOKEN is not set
+           - The Hugging Face API call fails for any reason
+
+       Accepts optional shap_values so bullet points reference per-prediction
+       SHAP attributions rather than just global importance rank.
+
+Why keep this alongside an LLM?
+    The LLM can fail — rate limit, network error, model cold-start timeout.
+    This engine runs entirely locally with zero external dependencies.
+    The app degrades gracefully to this instead of returning an error.
+    Users don't know or care which path ran — they get an explanation either way.
 """
 
 import json
@@ -33,16 +38,15 @@ from pathlib import Path
 BASE      = Path(__file__).parent
 MODEL_DIR = BASE / "model"
 
-FEATURE_IMPORTANCE = json.loads((MODEL_DIR / "feature_importance.json").read_text())
-FEATURE_STATS      = json.loads((MODEL_DIR / "feature_stats.json").read_text())
+FEATURE_IMPORTANCE = json.loads(
+    (MODEL_DIR / "feature_importance.json").read_text()
+)
+FEATURE_STATS = json.loads(
+    (MODEL_DIR / "feature_stats.json").read_text()
+)
 
 
 # ── Feature metadata ──────────────────────────────────────────────────────────
-# Each entry contains:
-#   label       — short display name shown in the UI
-#   description — plain English for the glossary (non-technical users)
-#   favorable   — which direction favours groundwater: 'high', 'low', 'context'
-#   explain_high / explain_low — used in reasoning bullet points
 
 FEATURE_INFO = {
     "RAINFALL": {
@@ -50,8 +54,8 @@ FEATURE_INFO = {
         "description": (
             "How much precipitation this area typically receives. "
             "More rainfall means more water available to soak into the ground "
-            "and recharge the aquifer below. Think of it as how often and how "
-            "heavily it rains at this location across the year."
+            "and recharge the aquifer below. Think of it as how often and "
+            "how heavily it rains across the year at this location."
         ),
         "favorable":    "high",
         "explain_high": (
@@ -63,7 +67,6 @@ FEATURE_INFO = {
             "down and replenish the aquifer"
         ),
     },
-
     "ELEVATION": {
         "label": "Elevation",
         "description": (
@@ -79,17 +82,16 @@ FEATURE_INFO = {
         ),
         "explain_low": (
             "lower-lying terrain acts as a collection zone for water "
-            "draining in from the surrounding area"
+            "draining in from surrounding areas"
         ),
     },
-
     "LULC": {
         "label": "Land Use / Land Cover",
         "description": (
             "What covers the ground at this location — forest, farmland, "
-            "built-up urban area, bare soil, water body, etc. This controls "
-            "how easily rainwater soaks into the ground versus running off "
-            "the surface. A forest floor absorbs far more than a paved road."
+            "built-up area, bare soil, water body, etc. This controls how "
+            "easily rainwater soaks into the ground versus running off the "
+            "surface. A forest floor absorbs far more than a paved road."
         ),
         "favorable":    "context",
         "explain_high": (
@@ -101,7 +103,6 @@ FEATURE_INFO = {
             "groundwater recharge here"
         ),
     },
-
     "DRAINAGE": {
         "label": "Drainage Density",
         "description": (
@@ -120,15 +121,14 @@ FEATURE_INFO = {
             "long enough to percolate underground"
         ),
     },
-
     "NDVI": {
         "label": "Vegetation Index (NDVI)",
         "description": (
             "A satellite-derived measure of how green and healthy the "
             "vegetation is, on a scale from bare ground to dense forest. "
-            "Lush vegetation often signals accessible moisture below the "
-            "surface — plants need water to grow, so healthy vegetation "
-            "is a proxy for subsurface moisture."
+            "Lush vegetation signals accessible moisture below the surface "
+            "— plants need water to grow, so healthy vegetation is a proxy "
+            "for subsurface moisture availability."
         ),
         "favorable":    "high",
         "explain_high": (
@@ -140,35 +140,32 @@ FEATURE_INFO = {
             "subsurface moisture availability"
         ),
     },
-
     "LITHOLOGY": {
         "label": "Lithology (Rock / Soil Type)",
         "description": (
-            "The type of rock or soil beneath the surface at this location. "
-            "Some types — sand, gravel, or fractured rock — let water pass "
-            "through easily and store it in pores and cracks. Others — "
-            "dense clay or solid crystalline rock — block water movement "
-            "entirely. This is often the single most important factor."
+            "The type of rock or soil beneath the surface. Some types — "
+            "sand, gravel, fractured rock — let water pass through easily "
+            "and store it. Others — dense clay, solid crystalline rock — "
+            "block water movement entirely. This is often the single most "
+            "important factor for groundwater presence."
         ),
         "favorable":    "context",
         "explain_high": (
             "this lithology class is relatively porous or fractured, "
-            "supporting water movement and storage underground"
+            "supporting water movement and underground storage"
         ),
         "explain_low": (
             "this lithology class has limited permeability, "
             "restricting groundwater accumulation"
         ),
     },
-
     "SLOPE": {
         "label": "Slope",
         "description": (
             "How steep the terrain is at this location. Gentle slopes give "
             "rainfall more time to soak into the ground before it flows "
             "away. Steep slopes cause water to rush off quickly as surface "
-            "runoff with almost no time to infiltrate — like water on a "
-            "tilted glass versus a flat plate."
+            "runoff — like water on a tilted glass versus a flat plate."
         ),
         "favorable":    "low",
         "explain_high": (
@@ -180,14 +177,13 @@ FEATURE_INFO = {
             "to percolate into the ground"
         ),
     },
-
     "CURVATURE": {
         "label": "Curvature",
         "description": (
             "Whether the land surface curves inward (concave — like a bowl, "
             "collecting water) or outward (convex — like a dome, shedding "
-            "water) at this point. Concave areas concentrate flow from "
-            "surrounding land; convex areas disperse it outward."
+            "water). Concave areas concentrate flow from surrounding land; "
+            "convex areas disperse it outward."
         ),
         "favorable":    "context",
         "explain_high": (
@@ -199,15 +195,13 @@ FEATURE_INFO = {
             "and spread away from this point"
         ),
     },
-
     "SPI": {
         "label": "Stream Power Index (SPI)",
         "description": (
             "A terrain-derived index measuring the erosive power of water "
             "flow at this point, combining slope steepness with how much "
             "land drains through here from upstream. High SPI marks active "
-            "drainage channels. Low SPI means this is not a natural "
-            "concentrated flow path."
+            "drainage channels. Low SPI means limited concentrated flow."
         ),
         "favorable":    "context",
         "explain_high": (
@@ -219,16 +213,14 @@ FEATURE_INFO = {
             "at this location"
         ),
     },
-
     "TWI": {
         "label": "Topographic Wetness Index (TWI)",
         "description": (
-            "A terrain index that estimates how much water tends to "
-            "accumulate at a given point, based on how flat it is and "
-            "how much land drains into it from uphill. Higher TWI means "
-            "the terrain geometry naturally makes this a wetter location "
-            "— like the bottom of a shallow bowl that collects runoff "
-            "from its surroundings."
+            "A terrain index estimating how much water accumulates at a "
+            "given point, based on how flat it is and how much land drains "
+            "into it from uphill. Higher TWI means the terrain geometry "
+            "makes this a naturally wetter location — like the bottom of a "
+            "shallow bowl collecting runoff from its surroundings."
         ),
         "favorable":    "high",
         "explain_high": (
@@ -247,24 +239,24 @@ FEATURE_INFO = {
 
 def _level(col: str, value: float) -> str:
     """
-    Classify a feature value as 'low', 'medium', or 'high' relative
-    to the training data distribution using z-score thresholds.
+    Classify a feature value as 'low', 'medium', or 'high' relative to
+    the training data distribution using z-score thresholds of ±0.5.
 
-    Thresholds (±0.5 std) are intentionally loose — the features are
-    discretized integers (1-5), so a ±0.5 std band avoids over-labelling
-    every value as extreme.
+    Thresholds are intentionally loose because all features are discretized
+    integers (1–5) — tight thresholds would over-label every value as extreme.
 
     Args:
-        col   : feature column name (must be in FEATURE_STATS)
-        value : raw feature value submitted by the user
+        col   : feature name (must exist in FEATURE_STATS)
+        value : raw user-submitted value
 
     Returns:
         'low', 'medium', or 'high'
     """
-    stats       = FEATURE_STATS[col]
-    mean        = stats["mean"]
-    std         = stats["std"] or 1e-6   # guard against zero std
-    z           = (value - mean) / std
+    stats = FEATURE_STATS[col]
+    mean  = stats["mean"]
+    std   = stats["std"] or 1e-6   # guard against zero std
+    z     = (value - mean) / std
+
     if z >= 0.5:  return "high"
     if z <= -0.5: return "low"
     return "medium"
@@ -282,29 +274,31 @@ def generate_reasoning(
     """
     Generate a structured plain-English explanation for a prediction.
 
-    Structure of the output:
-        1. Opening verdict line (prediction + probability + confidence)
-        2. Bullet points for top_n features (importance rank + level +
-           SHAP direction if available + explanation string)
-        3. Combination reasoning paragraph (how the top 2-3 features
-           interact together to produce this outcome)
-        4. Closing sentence summarising the overall picture
+    Output structure:
+        1. Opening verdict (prediction label + probability + confidence word)
+        2. Bullet points for top_n features by global importance
+           Each bullet includes: label, level (low/med/high), importance rank,
+           optional SHAP attribution, and a plain-English explanation string
+        3. Combination reasoning paragraph (how top 2-3 features interact)
+
+    This output is markdown-formatted. The frontend renders ** as bold.
 
     Args:
-        feature_values : dict of {FEATURE_COL: float} — user inputs
-        prediction     : 0 or 1 from the model
-        probability    : model probability for class 1 (0.0 – 1.0)
-        shap_values    : optional dict of {FEATURE_COL: float} SHAP values
-                         for this specific prediction (from agent.py)
-        top_n          : how many features to include in bullet points
+        feature_values : dict of {FEATURE_COL: float}
+        prediction     : 0 or 1
+        probability    : model probability for class 1 (0.0–1.0)
+        shap_values    : optional {FEATURE_COL: float} from agent.py
+                         if provided, bullet points include SHAP direction
+        top_n          : how many features to cover in bullet points
 
     Returns:
-        Markdown-formatted string (bold via ** supported by the frontend)
+        Markdown string ready for frontend rendering
     """
     ranked = list(FEATURE_IMPORTANCE.items())[:top_n]
+    imp_keys = list(FEATURE_IMPORTANCE.keys())
 
-    # ── Build bullet points ───────────────────────────────────────────────
-    bullet_points = []
+    # ── Bullet points ─────────────────────────────────────────────────────
+    bullets = []
     for col, importance in ranked:
         if col not in feature_values:
             continue
@@ -312,34 +306,35 @@ def generate_reasoning(
         val   = feature_values[col]
         level = _level(col, val)
         info  = FEATURE_INFO.get(col, {"label": col})
+        rank  = imp_keys.index(col) + 1
 
-        # SHAP note — only included if SHAP values were computed
+        # SHAP note — only if SHAP values are available
         shap_note = ""
         if shap_values and col in shap_values:
-            sv        = shap_values[col]
-            direction = (
-                "pushed this prediction toward groundwater present"
+            sv  = shap_values[col]
+            dir = (
+                "pushed toward groundwater present"
                 if sv > 0 else
-                "pushed this prediction toward groundwater absent"
+                "pushed toward groundwater absent"
             )
-            shap_note = f" — SHAP={sv:+.3f} ({direction})"
+            shap_note = f" — SHAP={sv:+.3f} ({dir})"
 
         # Explanation string
         if level == "medium":
             explain = (
-                "close to the regional average, so it has a "
-                "roughly neutral effect on this prediction"
+                "close to the regional average — roughly neutral effect "
+                "on this prediction"
             )
         else:
             explain = info.get(f"explain_{level}", "")
 
-        bullet_points.append(
+        bullets.append(
             f"- **{info['label']}** is **{level}** "
-            f"(value={val:.0f}, importance rank #{list(FEATURE_IMPORTANCE.keys()).index(col)+1}"
-            f"{shap_note}): {explain}."
+            f"(value={val:.0f}, importance rank #{rank}{shap_note}): "
+            f"{explain}."
         )
 
-    # ── Confidence label ──────────────────────────────────────────────────
+    # ── Confidence word ───────────────────────────────────────────────────
     p = probability
     confidence = (
         "very high" if p > 0.85 or p < 0.15 else
@@ -353,19 +348,17 @@ def generate_reasoning(
         "**unlikely to have significant groundwater**"
     )
 
-    # ── Assemble output ───────────────────────────────────────────────────
-    summary = (
+    # ── Assemble body ─────────────────────────────────────────────────────
+    output = (
         f"Based on the trained Random Forest model, this location is {verdict} "
         f"(probability: {p*100:.1f}%, {confidence} confidence).\n\n"
-        f"The following factors drove this decision, ranked by how much "
-        f"the model relies on them overall:\n\n"
-        + "\n".join(bullet_points)
+        f"Key factors driving this decision, ranked by model importance:\n\n"
+        + "\n".join(bullets)
     )
 
     # ── Combination reasoning ─────────────────────────────────────────────
-    # Groundwater presence is almost never caused by one factor alone.
-    # This paragraph explains how the top 2-3 factors work together —
-    # which is the most useful insight for a non-technical user.
+    # Explains how the top 2-3 features interact — not just what each means.
+    # This is the most useful insight for a non-technical user.
     combo_terms = []
     for col, _ in ranked[:3]:
         if col not in feature_values:
@@ -375,29 +368,27 @@ def generate_reasoning(
         combo_terms.append(f"{label.lower()} ({level})")
 
     if len(combo_terms) >= 2:
-        combo = (
-            ", ".join(combo_terms[:-1]) + " and " + combo_terms[-1]
-        )
+        combo = ", ".join(combo_terms[:-1]) + " and " + combo_terms[-1]
+
         if prediction == 1:
-            summary += (
+            output += (
                 f"\n\n**Why this combination matters:** {combo} occurring "
-                f"together creates a compounding effect that favours "
-                f"recharge. Groundwater accumulation requires both a water "
-                f"source (sufficient rainfall reaching the surface) and the "
-                f"right conditions for that water to infiltrate and stay "
-                f"underground rather than run off or evaporate. When the "
-                f"top-ranked factors align favourably at the same location, "
-                f"the pattern closely matches confirmed wells in the "
-                f"training dataset."
+                f"together creates a compounding effect that favours recharge. "
+                f"Groundwater accumulation requires both a water source "
+                f"(sufficient rainfall reaching the surface) and the right "
+                f"conditions for that water to infiltrate and stay underground "
+                f"rather than run off or evaporate. When these top-ranked "
+                f"factors align favourably at the same location, the pattern "
+                f"closely matches confirmed wells in the training dataset."
             )
         else:
-            summary += (
+            output += (
                 f"\n\n**Why this combination matters:** {combo} occurring "
                 f"together tips the balance against groundwater accumulation. "
-                f"Even if one factor alone were borderline, the combination "
+                f"Even if one factor alone were borderline, this combination "
                 f"consistently favours surface runoff and evaporation over "
                 f"infiltration and underground storage — a pattern the model "
                 f"associates with absence of wells in the training data."
             )
 
-    return summary
+    return output

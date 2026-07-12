@@ -17,6 +17,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app import app  # noqa: E402
+from gw_project.main import app  # noqa: E402
 
 # Vercel's Python runtime looks for a module-level WSGI app named `app`

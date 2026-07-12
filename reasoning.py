@@ -50,186 +50,218 @@ FEATURE_STATS = json.loads(
 
 FEATURE_INFO = {
     "RAINFALL": {
-        "label": "Rainfall",
+        "label": "Rainfall (Annual, classified)",
         "description": (
-            "How much precipitation this area typically receives. "
-            "More rainfall means more water available to soak into the ground "
-            "and recharge the aquifer below. Think of it as how often and "
-            "how heavily it rains across the year at this location."
+            "Annual rainfall classified into 5 ordinal classes. "
+            "Class 1 = very low rainfall (< 700 mm/year, as seen in Jalaun/Datia districts). "
+            "Class 3 = moderate (around 900–1000 mm, typical Bundelkhand average). "
+            "Class 5 = very high (> 1100 mm/year, as seen in Sagar/Panna districts). "
+            "Higher class = more water available to recharge the aquifer below."
         ),
         "favorable":    "high",
         "explain_high": (
-            "higher rainfall provides more water for aquifer recharge, "
-            "raising the water table over time"
+            "higher rainfall class means more annual precipitation available "
+            "to infiltrate and recharge the aquifer below"
         ),
         "explain_low": (
-            "lower rainfall means less water is available to percolate "
-            "down and replenish the aquifer"
+            "lower rainfall class means less annual precipitation, "
+            "reducing groundwater recharge potential significantly"
         ),
     },
     "ELEVATION": {
-        "label": "Elevation",
+        "label": "Elevation (classified)",
         "description": (
-            "Height of the land above sea level. Low-lying areas tend to "
-            "collect water that drains down from surrounding higher ground. "
-            "Higher areas shed water downslope before it has a chance to "
-            "soak in — think of a hilltop versus a valley floor."
+            "Land height above sea level, classified into 5 ordinal classes. "
+            "In Bundelkhand, elevation ranges from ~150 m (river plains) to ~600 m "
+            "(Vindhya Range hills). "
+            "Class 1 = lowest elevation (valley floors, river plains — water collects here). "
+            "Class 5 = highest elevation (hilltops — water drains away before it can soak in). "
+            "Lower elevation classes favour groundwater accumulation."
         ),
         "favorable":    "low",
         "explain_high": (
-            "higher elevation causes water to drain away downslope "
-            "rather than infiltrate locally"
+            "higher elevation class means water drains away downslope "
+            "rather than infiltrating locally"
         ),
         "explain_low": (
-            "lower-lying terrain acts as a collection zone for water "
-            "draining in from surrounding areas"
+            "lower elevation class places this site in a valley or plain "
+            "that collects and retains infiltrating water"
         ),
     },
     "LULC": {
-        "label": "Land Use / Land Cover",
+        "label": "Land Use / Land Cover (classified)",
         "description": (
-            "What covers the ground at this location — forest, farmland, "
-            "built-up area, bare soil, water body, etc. This controls how "
-            "easily rainwater soaks into the ground versus running off the "
-            "surface. A forest floor absorbs far more than a paved road."
+            "What covers the ground, classified into 5 ordinal classes by infiltration potential. "
+            "Class 1 = water bodies or dense urban areas (minimal infiltration). "
+            "Class 2 = barren/fallow land. "
+            "Class 3 = agricultural land (moderate infiltration). "
+            "Class 4 = scrubland/open forest. "
+            "Class 5 = dense forest (maximum infiltration — forest floor absorbs "
+            "far more rainfall than any other cover type)."
         ),
         "favorable":    "context",
         "explain_high": (
-            "this land cover class is associated with reduced infiltration "
-            "rates in this region"
+            "this land cover class is associated with better infiltration "
+            "and groundwater recharge potential"
         ),
         "explain_low": (
-            "this land cover class supports better infiltration and "
-            "groundwater recharge here"
+            "this land cover class is associated with reduced infiltration "
+            "and lower groundwater recharge"
         ),
     },
     "DRAINAGE": {
-        "label": "Drainage Density",
+        "label": "Drainage Density (classified)",
         "description": (
-            "How many streams and channels run through this area per unit "
-            "of land. Densely-drained areas efficiently remove surface water "
-            "as runoff, leaving little time for it to soak in. Sparsely "
-            "drained areas let water linger and percolate underground."
+            "How many stream channels exist per unit area, classified into 5 ordinal classes. "
+            "In Bundelkhand studies, drainage density ranges from ~0.5 to ~2.3 km/km². "
+            "Class 1 = very high drainage density (streams everywhere — water is shed "
+            "quickly as runoff, leaving little time to soak in). "
+            "Class 5 = very low drainage density (sparse streams — water lingers "
+            "longer and has more time to percolate underground). "
+            "Lower drainage density classes favour groundwater recharge."
         ),
         "favorable":    "low",
         "explain_high": (
-            "dense drainage networks efficiently remove surface water, "
-            "reducing the time available for infiltration"
+            "high drainage density class means water is efficiently channelled "
+            "away as surface runoff before it can infiltrate"
         ),
         "explain_low": (
-            "sparse drainage allows more water to linger on the surface "
-            "long enough to percolate underground"
+            "low drainage density class means water lingers on the surface "
+            "longer, giving it more time to percolate underground"
         ),
     },
     "NDVI": {
-        "label": "Vegetation Index (NDVI)",
+        "label": "Vegetation Index — NDVI (classified)",
         "description": (
-            "A satellite-derived measure of how green and healthy the "
-            "vegetation is, on a scale from bare ground to dense forest. "
-            "Lush vegetation signals accessible moisture below the surface "
-            "— plants need water to grow, so healthy vegetation is a proxy "
-            "for subsurface moisture availability."
+            "Satellite-derived measure of vegetation health and density, "
+            "classified into 5 ordinal classes. "
+            "Raw NDVI ranges from -1 to +1: negative values = water/clouds/snow; "
+            "0–0.1 = bare rock or soil; 0.2–0.5 = sparse shrubs/grassland; "
+            "0.5–0.9 = dense forest/healthy crops. "
+            "Class 1 = very low NDVI (bare, degraded land). "
+            "Class 5 = very high NDVI (dense healthy vegetation — strong indicator "
+            "of subsurface moisture availability)."
         ),
         "favorable":    "high",
         "explain_high": (
-            "healthy dense vegetation indicates abundant subsurface "
-            "moisture, suggesting good recharge conditions"
+            "high NDVI class indicates dense, healthy vegetation — "
+            "a reliable proxy for good subsurface moisture and recharge conditions"
         ),
         "explain_low": (
-            "sparse or stressed vegetation suggests limited "
-            "subsurface moisture availability"
+            "low NDVI class indicates sparse or stressed vegetation, "
+            "suggesting limited subsurface moisture"
         ),
     },
     "LITHOLOGY": {
-        "label": "Lithology (Rock / Soil Type)",
+        "label": "Lithology — Rock/Soil Type (classified)",
         "description": (
-            "The type of rock or soil beneath the surface. Some types — "
-            "sand, gravel, fractured rock — let water pass through easily "
-            "and store it. Others — dense clay, solid crystalline rock — "
-            "block water movement entirely. This is often the single most "
-            "important factor for groundwater presence."
+            "The type of rock or soil beneath the surface, classified by permeability. "
+            "Bundelkhand is dominated by Precambrian granite and gneiss (hard rock, "
+            "low primary porosity) with alluvial patches along rivers. "
+            "Class 1 = dense crystalline rock (granite/quartzite) — very low permeability. "
+            "Class 3 = weathered/fractured rock — moderate permeability. "
+            "Class 5 = alluvium/sand/gravel — highest permeability and water storage. "
+            "This is often the single most important factor for groundwater."
         ),
         "favorable":    "context",
         "explain_high": (
-            "this lithology class is relatively porous or fractured, "
-            "supporting water movement and underground storage"
+            "higher lithology class indicates more permeable or fractured rock, "
+            "allowing water to move through and accumulate underground"
         ),
         "explain_low": (
-            "this lithology class has limited permeability, "
-            "restricting groundwater accumulation"
+            "lower lithology class indicates dense impermeable rock that "
+            "blocks water movement and limits underground storage"
         ),
     },
     "SLOPE": {
-        "label": "Slope",
+        "label": "Slope (classified)",
         "description": (
-            "How steep the terrain is at this location. Gentle slopes give "
-            "rainfall more time to soak into the ground before it flows "
-            "away. Steep slopes cause water to rush off quickly as surface "
-            "runoff — like water on a tilted glass versus a flat plate."
+            "Terrain steepness classified into 5 ordinal classes. "
+            "In groundwater studies, slope is typically measured in degrees: "
+            "Class 1 = nearly flat (0–2°, excellent infiltration — water has maximum "
+            "time to soak in). "
+            "Class 2 = gentle (2–5°). "
+            "Class 3 = moderate (5–15°). "
+            "Class 4 = steep (15–30°). "
+            "Class 5 = very steep (> 30°, water runs off almost immediately). "
+            "Flat terrain always favours groundwater recharge over steep terrain."
         ),
         "favorable":    "low",
         "explain_high": (
-            "steep slopes accelerate surface runoff, leaving little "
-            "water available to infiltrate the subsurface"
+            "high slope class means steep terrain where rainwater runs off "
+            "quickly before it can infiltrate the ground"
         ),
         "explain_low": (
-            "gentle slopes allow rainfall to linger long enough "
-            "to percolate into the ground"
+            "low slope class means nearly flat terrain where water moves slowly "
+            "and has maximum time to percolate underground"
         ),
     },
     "CURVATURE": {
-        "label": "Curvature",
+        "label": "Surface Curvature (classified)",
         "description": (
-            "Whether the land surface curves inward (concave — like a bowl, "
-            "collecting water) or outward (convex — like a dome, shedding "
-            "water). Concave areas concentrate flow from surrounding land; "
-            "convex areas disperse it outward."
+            "Whether the land surface curves inward or outward at this point, "
+            "classified into 5 ordinal classes. "
+            "Raw curvature in GIS typically ranges from around -1.5 to +2.2 (unitless). "
+            "Negative values = concave surface (bowl-shaped, collects water — "
+            "favourable for recharge). "
+            "Zero = flat surface. "
+            "Positive values = convex surface (dome-shaped, sheds water — "
+            "unfavourable for recharge). "
+            "Class 1 = strongly concave; Class 5 = strongly convex in most classifications."
         ),
         "favorable":    "context",
         "explain_high": (
-            "the surface curvature here causes water to converge, "
-            "which can enhance local infiltration"
+            "this curvature class indicates a convex or divergent surface "
+            "that sheds water outward rather than collecting it"
         ),
         "explain_low": (
-            "the surface curvature causes water to diverge "
-            "and spread away from this point"
+            "this curvature class indicates a concave or convergent surface "
+            "that collects water from the surrounding terrain"
         ),
     },
     "SPI": {
-        "label": "Stream Power Index (SPI)",
+        "label": "Stream Power Index — SPI (classified)",
         "description": (
-            "A terrain-derived index measuring the erosive power of water "
-            "flow at this point, combining slope steepness with how much "
-            "land drains through here from upstream. High SPI marks active "
-            "drainage channels. Low SPI means limited concentrated flow."
+            "A terrain index measuring the erosive power of surface water flow, "
+            "classified into 5 ordinal classes. "
+            "Raw SPI = ln(catchment area × tan(slope)) — typical values range "
+            "from about -6 to +19 in GIS studies. "
+            "Class 1 = low SPI (gentle terrain, limited flow power). "
+            "Class 5 = very high SPI (active drainage channel with strong flow). "
+            "High SPI zones mark natural drainage pathways that can also serve "
+            "as recharge conduits into the subsurface."
         ),
         "favorable":    "context",
         "explain_high": (
-            "high SPI indicates a natural drainage pathway that can "
-            "channel recharge water into the subsurface"
+            "high SPI class indicates an active drainage pathway with strong "
+            "flow power — these zones can channel water into the subsurface"
         ),
         "explain_low": (
-            "low SPI reflects limited concentrated surface flow "
-            "at this location"
+            "low SPI class indicates gentle terrain with limited surface flow "
+            "concentration at this location"
         ),
     },
     "TWI": {
-        "label": "Topographic Wetness Index (TWI)",
+        "label": "Topographic Wetness Index — TWI (classified)",
         "description": (
-            "A terrain index estimating how much water accumulates at a "
-            "given point, based on how flat it is and how much land drains "
-            "into it from uphill. Higher TWI means the terrain geometry "
-            "makes this a naturally wetter location — like the bottom of a "
-            "shallow bowl collecting runoff from its surroundings."
+            "Terrain index estimating how much water accumulates at a point, "
+            "classified into 5 ordinal classes. "
+            "Raw TWI = ln(catchment area / tan(slope)). "
+            "Typical values: upper slopes ~5.5, mid slopes ~7.3, "
+            "convergent lower slopes ~11.5, valley channels > 12. "
+            "Class 1 = low TWI (ridges and upper slopes — dry zones). "
+            "Class 5 = high TWI (valleys, floodplains — naturally wet zones "
+            "where terrain geometry concentrates moisture). "
+            "High TWI strongly favours groundwater recharge and presence."
         ),
         "favorable":    "high",
         "explain_high": (
-            "high TWI identifies this as a natural moisture-accumulation "
-            "zone, favouring groundwater recharge"
+            "high TWI class identifies this as a natural moisture-accumulation "
+            "zone — terrain geometry concentrates water here, favouring recharge"
         ),
         "explain_low": (
-            "low TWI means the terrain geometry works against "
-            "moisture accumulation at this point"
+            "low TWI class means the terrain geometry actively disperses water "
+            "away from this point rather than concentrating it"
         ),
     },
 }

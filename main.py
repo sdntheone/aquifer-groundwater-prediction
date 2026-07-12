@@ -142,15 +142,21 @@ class FeatureInput(BaseModel):
     TWI:       float
 
     model_config = {
-        "json_schema_extra": {
-            "example": {
-                "ELEVATION": 2, "CURVATURE": 3, "DRAINAGE": 2,
-                "LITHOLOGY": 2, "LULC": 3,      "NDVI": 3,
-                "RAINFALL":  3, "SLOPE": 2,      "SPI": 2,
-                "TWI": 3,
-            }
+    "json_schema_extra": {
+        "example": {
+            "ELEVATION": 2,
+            "CURVATURE": 2,
+            "DRAINAGE":  4,
+            "LITHOLOGY": 3,
+            "LULC":      3,
+            "NDVI":      3,
+            "RAINFALL":  3,
+            "SLOPE":     2,
+            "SPI":       3,
+            "TWI":       4,
         }
     }
+}
 
 
 # ── Custom 422 handler ────────────────────────────────────────────────────────
@@ -251,7 +257,8 @@ def reverse_geocode(lat: float, lon: float) -> str:
 async def index(request: Request):
     """Serve the 3-page map UI."""
     return templates.TemplateResponse(
-        "index.html", {"request": request}
+        request=request,
+        name="index.html",
     )
 
 

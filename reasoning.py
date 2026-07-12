@@ -266,7 +266,6 @@ FEATURE_INFO = {
     },
 }
 
-
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _level(col: str, value: float) -> str:

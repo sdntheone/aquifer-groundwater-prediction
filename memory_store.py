@@ -1,36 +1,41 @@
 """
 memory_store.py
 ===============
-Handles two of the three memory layers used by the agent.
+Manages two of the three memory layers used by the LangGraph agent.
+
+The three layers:
 
     Layer 1 — Working memory
-        Managed automatically by LangGraph's InvestigationState dict.
-        No code needed here.
+        The InvestigationState TypedDict in agent.py.
+        LangGraph manages this automatically — no code here.
 
-    Layer 2 — Session memory  (in-process dict)
-        Per-user prediction history for the current server session.
-        Keyed by Flask session ID (uuid4).
-        Resets on server restart — sessions are ephemeral by design.
+    Layer 2 — Session memory  (this file)
+        An in-process Python dict keyed by session_id (a uuid4 string
+        assigned by FastAPI's SessionMiddleware on first request).
+        Stores the last 20 predictions per session.
+        Resets when the server restarts — sessions are ephemeral by nature.
+        For persistence across restarts, swap _session_store for Redis.
 
-    Layer 3 — Long-term memory  (PostgreSQL)
-        Every prediction is written to the predictions table.
+    Layer 3 — Long-term memory  (this file)
+        Every prediction is written to the PostgreSQL predictions table
+        via log_prediction_to_db().
         Enables:
-          - Drift detection (compare submitted feature distributions
-            to training data over time)
-          - Aggregate stats fed back to the Communicator Agent
-          - Full audit trail of every prediction ever made
-          - SQL queries for analysis:
-              SELECT AVG(rainfall), AVG(probability)
-              FROM predictions
-              WHERE timestamp > NOW() - INTERVAL '30 days'
+            - Drift detection: compare submitted feature distributions
+              to training data distributions over time
+            - Aggregate stats fed back to the Communicator Agent as context
+            - Full audit trail of every prediction ever made
 
-Usage (called by app.py):
-    from memory_store import (
-        add_to_session,
-        get_session_summary,
-        log_prediction_to_db,
-        get_aggregate_stats,
-    )
+Public API (imported by main.py):
+    add_to_session(session_id, record)
+    get_session_summary(session_id) -> dict | None
+    log_prediction_to_db(session_id, feature_values, ...)
+    get_aggregate_stats() -> dict
+
+Note on function naming:
+    log_prediction_to_db (not log_prediction) — the explicit suffix
+    makes it obvious this is a DB write, not an in-memory operation.
+    This matters when reading main.py — you immediately know what
+    storage layer is being touched.
 """
 
 import os
@@ -42,57 +47,74 @@ from collections import defaultdict
 import psycopg2
 import psycopg2.extras
 
-# ── Database connection string ────────────────────────────────────────────────
-# Falls back to local defaults if DATABASE_URL is not set —
-# makes local dev without Docker Compose still work (just run Postgres locally)
+# ── Database connection ───────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://aquifer_user:aquifer_pass@localhost:5432/aquifer"
+    "postgresql://aquifer_user:aquifer_pass@localhost:5432/aquifer",
 )
 
-# ── Thread lock ───────────────────────────────────────────────────────────────
-# Protects the in-process session store from concurrent request corruption.
+# ── Thread safety ─────────────────────────────────────────────────────────────
+# FastAPI can handle concurrent requests (especially with async endpoints).
+# The in-process session store is shared across all requests in the same
+# process, so reads and writes need to be protected.
 _lock = threading.Lock()
 
-# ── Session store ─────────────────────────────────────────────────────────────
+# ── In-process session store ──────────────────────────────────────────────────
+# defaultdict(list) means _session_store[new_key] auto-initialises to []
+# instead of raising KeyError — cleaner than checking existence everywhere.
 _session_store: dict[str, list] = defaultdict(list)
 
 
-# ── Database helpers ──────────────────────────────────────────────────────────
+# ── Database helper ───────────────────────────────────────────────────────────
 
 def _get_conn():
     """
-    Open a new psycopg2 connection.
-    Each request gets its own connection — simple and safe for low-to-medium
-    traffic. For high traffic, swap this for a connection pool:
+    Open and return a new psycopg2 connection.
+
+    One connection per request is fine for this traffic level.
+    For high throughput, replace with a connection pool:
         from psycopg2 import pool
-        _pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+        _pool = pool.ThreadedConnectionPool(2, 20, DATABASE_URL)
+        conn = _pool.getconn()
+        # ... use conn ...
+        _pool.putconn(conn)
     """
     return psycopg2.connect(DATABASE_URL)
 
 
-# ── Session memory (Layer 2) ──────────────────────────────────────────────────
+# ── Layer 2: Session memory ───────────────────────────────────────────────────
 
 def add_to_session(session_id: str, record: dict) -> None:
     """
-    Append a prediction record to this user's in-memory session history.
-    Capped at 20 entries — oldest are silently dropped beyond that.
+    Append one prediction record to the user's in-memory session history.
+    Silently drops the oldest entry when the cap of 20 is exceeded.
+
+    Called by main.py after every successful prediction.
 
     Args:
-        session_id : uuid4 string assigned by Flask
-        record     : prediction result dict (features, prediction,
-                     probability, place_name, lat, lon)
+        session_id : uuid4 string from FastAPI SessionMiddleware
+        record     : dict containing at minimum prediction, probability,
+                     place_name, lat, lon, features
     """
     with _lock:
         _session_store[session_id].append({
             **record,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
+        # Cap at 20 — slice from the right to keep newest
         _session_store[session_id] = _session_store[session_id][-20:]
 
 
 def get_session_history(session_id: str) -> list:
-    """Return full session history for this user (newest last)."""
+    """
+    Return the full prediction history for this session (oldest first).
+
+    Args:
+        session_id : FastAPI session ID
+
+    Returns:
+        List of prediction record dicts, or empty list.
+    """
     with _lock:
         return list(_session_store.get(session_id, []))
 
@@ -100,16 +122,18 @@ def get_session_history(session_id: str) -> list:
 def get_session_summary(session_id: str) -> dict | None:
     """
     Build a concise summary of this session's predictions.
-    Fed to the Communicator Agent so it can compare the current
-    site to previous ones checked in the same session.
+    Passed to the Communicator Agent so it can compare the current
+    site against previous ones checked in the same session.
 
-    Returns None if this is the first prediction (nothing to compare).
+    Returns None on the first prediction of a session — there's
+    nothing to compare against yet, and None signals this clearly
+    to both the agent and the LLM prompt builder.
 
     Args:
-        session_id : Flask session ID
+        session_id : FastAPI session ID
 
     Returns:
-        Summary dict or None.
+        Summary dict, or None if no history exists yet.
     """
     history = get_session_history(session_id)
 
@@ -133,11 +157,12 @@ def get_session_summary(session_id: str) -> dict | None:
             "place":       worst.get("place_name", "unknown"),
             "probability": worst.get("probability", 0),
         },
+        # Give the agent the most recent prediction for direct comparison
         "last_prediction": history[-1],
     }
 
 
-# ── Long-term memory (Layer 3) ────────────────────────────────────────────────
+# ── Layer 3: Long-term memory (PostgreSQL) ────────────────────────────────────
 
 def log_prediction_to_db(
     session_id:          str,
@@ -153,20 +178,26 @@ def log_prediction_to_db(
 ) -> None:
     """
     Write one prediction to the PostgreSQL predictions table.
-    Also upserts a row in the sessions table to track unique users.
+    Also upserts a row in sessions to track unique session activity.
+
+    This is a non-fatal operation — if the DB write fails (e.g. DB is
+    down, connection refused), the error is printed to server logs but
+    the user still receives their prediction result.
+
+    Called by main.py after every successful agent run.
 
     Args:
-        session_id          : Flask session uuid
-        feature_values      : dict of {FEATURE_NAME: value}
+        session_id          : FastAPI session uuid
+        feature_values      : dict of {FEATURE_COL: value}
         prediction          : 0 or 1
-        probability         : float 0.0 – 1.0
-        matched_lat/lon     : coordinates of nearest matched survey point
-        place_name          : reverse-geocoded place name
-        reasoning_source    : 'huggingface' or 'template' or 'template_fallback'
+        probability         : float 0.0–1.0
+        matched_lat/lon     : coordinates of nearest feature-space match
+        place_name          : reverse-geocoded location string
+        reasoning_source    : 'huggingface', 'template', or 'template_fallback'
         sensitivity_results : list of sensitivity check dicts from agent
         flagged_conflicts   : list of conflict description strings from agent
     """
-    insert_prediction = """
+    sql_prediction = """
         INSERT INTO predictions (
             session_id,
             elevation, curvature, drainage, lithology, lulc,
@@ -184,7 +215,8 @@ def log_prediction_to_db(
         )
     """
 
-    upsert_session = """
+    # UPSERT — insert new session row, or bump n_queries if it exists
+    sql_session = """
         INSERT INTO sessions (session_id)
         VALUES (%s)
         ON CONFLICT (session_id)
@@ -193,72 +225,73 @@ def log_prediction_to_db(
             n_queries = sessions.n_queries + 1
     """
 
-    fv = feature_values   # shorthand
+    fv = feature_values
 
     try:
         conn = _get_conn()
         cur  = conn.cursor()
 
-        cur.execute(insert_prediction, (
+        cur.execute(sql_prediction, (
             session_id,
             fv.get("ELEVATION"), fv.get("CURVATURE"), fv.get("DRAINAGE"),
             fv.get("LITHOLOGY"), fv.get("LULC"),
             fv.get("NDVI"),      fv.get("RAINFALL"),  fv.get("SLOPE"),
             fv.get("SPI"),       fv.get("TWI"),
-            prediction,  probability,
-            matched_lat, matched_lon, place_name,
+            prediction,   probability,
+            matched_lat,  matched_lon, place_name,
             reasoning_source,
             json.dumps(sensitivity_results),
             flagged_conflicts,
         ))
 
-        cur.execute(upsert_session, (session_id,))
+        cur.execute(sql_session, (session_id,))
 
         conn.commit()
         cur.close()
         conn.close()
 
     except psycopg2.Error as e:
-        # Never let a DB write failure crash the prediction response.
-        # Log the error and continue — the user still gets their result.
+        # Non-fatal — log and continue
         print(f"[memory_store] DB write failed (non-fatal): {e}")
 
 
 def get_aggregate_stats() -> dict:
     """
     Query the predictions table for population-level statistics.
-    Fed to the Communicator Agent as long-term context.
 
-    Also useful for drift detection — compare
-    population_feature_averages against training data means
-    in model/feature_stats.json to spot distribution shift.
+    Used by the Communicator Agent as long-term context — e.g.
+    'across 150 predictions in this system, 23% were groundwater-likely.'
+
+    Also the foundation for drift detection: compare
+    population_feature_averages against model/feature_stats.json
+    means to spot if submitted values are drifting from training data.
 
     Returns:
-        Dict of stats, or {"total_predictions": 0} if table is empty
-        or database is unreachable.
+        Populated stats dict, or {"total_predictions": 0} if the table
+        is empty or the database is unreachable.
     """
-    query = """
+    sql = """
         SELECT
-            COUNT(*)                        AS total_predictions,
-            ROUND(AVG(prediction) * 100, 1) AS groundwater_likely_pct,
-            ROUND(AVG(probability)::numeric, 3) AS average_probability,
-            ROUND(AVG(elevation)::numeric, 2)   AS avg_elevation,
-            ROUND(AVG(curvature)::numeric, 2)   AS avg_curvature,
-            ROUND(AVG(drainage)::numeric, 2)    AS avg_drainage,
-            ROUND(AVG(lithology)::numeric, 2)   AS avg_lithology,
-            ROUND(AVG(lulc)::numeric, 2)        AS avg_lulc,
-            ROUND(AVG(ndvi)::numeric, 2)        AS avg_ndvi,
-            ROUND(AVG(rainfall)::numeric, 2)    AS avg_rainfall,
-            ROUND(AVG(slope)::numeric, 2)       AS avg_slope,
-            ROUND(AVG(spi)::numeric, 2)         AS avg_spi,
-            ROUND(AVG(twi)::numeric, 2)         AS avg_twi
+            COUNT(*)                             AS total_predictions,
+            ROUND(AVG(prediction) * 100, 1)      AS groundwater_likely_pct,
+            ROUND(AVG(probability)::numeric, 3)  AS average_probability,
+            ROUND(AVG(elevation)::numeric,  2)   AS avg_elevation,
+            ROUND(AVG(curvature)::numeric,  2)   AS avg_curvature,
+            ROUND(AVG(drainage)::numeric,   2)   AS avg_drainage,
+            ROUND(AVG(lithology)::numeric,  2)   AS avg_lithology,
+            ROUND(AVG(lulc)::numeric,       2)   AS avg_lulc,
+            ROUND(AVG(ndvi)::numeric,       2)   AS avg_ndvi,
+            ROUND(AVG(rainfall)::numeric,   2)   AS avg_rainfall,
+            ROUND(AVG(slope)::numeric,      2)   AS avg_slope,
+            ROUND(AVG(spi)::numeric,        2)   AS avg_spi,
+            ROUND(AVG(twi)::numeric,        2)   AS avg_twi
         FROM predictions
     """
 
     try:
         conn = _get_conn()
         cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(query)
+        cur.execute(sql)
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -267,9 +300,9 @@ def get_aggregate_stats() -> dict:
             return {"total_predictions": 0}
 
         return {
-            "total_predictions":      int(row["total_predictions"]),
-            "groundwater_likely_pct": float(row["groundwater_likely_pct"] or 0),
-            "average_probability":    float(row["average_probability"] or 0),
+            "total_predictions":       int(row["total_predictions"]),
+            "groundwater_likely_pct":  float(row["groundwater_likely_pct"] or 0),
+            "average_probability":     float(row["average_probability"] or 0),
             "population_feature_averages": {
                 "ELEVATION": float(row["avg_elevation"] or 0),
                 "CURVATURE": float(row["avg_curvature"] or 0),
@@ -285,6 +318,5 @@ def get_aggregate_stats() -> dict:
         }
 
     except psycopg2.Error as e:
-        # DB unreachable — return empty stats rather than crashing
         print(f"[memory_store] Could not fetch aggregate stats: {e}")
         return {"total_predictions": 0}

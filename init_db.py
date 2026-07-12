@@ -1,69 +1,78 @@
 """
 init_db.py
 ==========
-Creates the PostgreSQL tables needed by the application.
-Run this once before starting the app for the first time,
-or whenever you want to reset the database schema.
+Creates all PostgreSQL tables and indexes needed by the application.
+
+Run once before starting the app for the first time.
+Safe to run multiple times — all statements use IF NOT EXISTS.
 
 Usage:
-    # With Docker Compose running:
+    # With docker-compose DB running:
     python init_db.py
 
-    # Or inside the app container:
+    # Or inside the running app container:
     docker-compose exec app python init_db.py
 
-Tables created:
-    predictions   — one row per prediction request
-                    stores all 10 feature values, model output,
-                    matched location, and metadata
-                    used for drift detection and aggregate stats
+Tables:
+    predictions
+        One row per prediction request made through /api/predict_features.
+        Stores all 10 feature inputs, model output, matched coordinates,
+        agent metadata, and a timestamp.
+        Used for:
+            - Drift detection (track feature distribution over time)
+            - Aggregate stats fed back to the Communicator Agent
+            - Full audit trail of every prediction
 
-    sessions      — lightweight log of session activity
-                    used to count unique users over time
+    sessions
+        One row per unique Flask/FastAPI session.
+        Tracks how many queries each session has made.
+        Used for basic usage analytics.
 
-Schema design notes:
-    - feature values stored as SMALLINT (they are 1-5 integer classes)
-    - probability stored as REAL (4-byte float, sufficient precision)
-    - jsonb used for sensitivity_results (variable length, queryable)
-    - no ORM used intentionally — raw psycopg2 keeps the dependency
-      footprint small and makes the SQL explicit and auditable
+Schema decisions:
+    - SMALLINT for feature values (they are integer classes 1-5)
+    - REAL for probability (4-byte float, plenty of precision)
+    - JSONB for sensitivity_results (variable-length, queryable with SQL)
+    - TEXT[] for flagged_conflicts (simple array of strings)
+    - No ORM — raw psycopg2 keeps the dependency footprint small
+      and makes the SQL explicit and auditable
 """
 
 import os
 import sys
 import psycopg2
-from psycopg2 import sql
 
 # ── Connection ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://aquifer_user:aquifer_pass@localhost:5432/aquifer"
+    "postgresql://aquifer_user:aquifer_pass@localhost:5432/aquifer",
 )
 
 
 def get_connection():
     """
-    Open and return a psycopg2 connection.
-    Raises a clear error if the database is not reachable.
+    Open a psycopg2 connection with autocommit enabled.
+    Prints a helpful error and exits cleanly if the DB is unreachable.
     """
     try:
         conn = psycopg2.connect(DATABASE_URL)
         conn.autocommit = True
         return conn
     except psycopg2.OperationalError as e:
-        print(f"\nCould not connect to PostgreSQL: {e}")
-        print("Make sure Docker Compose is running:  docker-compose up db")
+        print(f"\nERROR: Could not connect to PostgreSQL.\n{e}")
+        print("\nMake sure Docker Compose is running:")
+        print("    docker-compose up db -d")
         sys.exit(1)
 
 
-# ── Table definitions ─────────────────────────────────────────────────────────
-CREATE_PREDICTIONS_TABLE = """
-CREATE TABLE IF NOT EXISTS predictions (
-    id              SERIAL PRIMARY KEY,
-    session_id      TEXT        NOT NULL,
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+# ── DDL statements ────────────────────────────────────────────────────────────
 
-    -- 10 feature inputs (discretized classes 1-5)
+CREATE_PREDICTIONS = """
+CREATE TABLE IF NOT EXISTS predictions (
+    id              SERIAL          PRIMARY KEY,
+    session_id      TEXT            NOT NULL,
+    timestamp       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    -- 10 feature inputs (discretized integer classes 1–5)
     elevation       SMALLINT,
     curvature       SMALLINT,
     drainage        SMALLINT,
@@ -76,71 +85,74 @@ CREATE TABLE IF NOT EXISTS predictions (
     twi             SMALLINT,
 
     -- Model output
-    prediction      SMALLINT    NOT NULL,   -- 0 or 1
-    probability     REAL        NOT NULL,   -- 0.0 to 1.0
+    prediction      SMALLINT        NOT NULL,
+    probability     REAL            NOT NULL,
 
-    -- Matched location
+    -- Matched reference point
     matched_lat     DOUBLE PRECISION,
     matched_lon     DOUBLE PRECISION,
     place_name      TEXT,
 
-    -- Agent outputs
-    reasoning_source    TEXT,               -- 'huggingface' or 'template'
-    sensitivity_results JSONB,              -- list of sensitivity check results
-    flagged_conflicts   TEXT[]              -- array of conflict descriptions
+    -- Agent metadata
+    reasoning_source    TEXT,
+    sensitivity_results JSONB,
+    flagged_conflicts   TEXT[]
 );
 """
 
-CREATE_SESSIONS_TABLE = """
+CREATE_SESSIONS = """
 CREATE TABLE IF NOT EXISTS sessions (
-    id          SERIAL PRIMARY KEY,
-    session_id  TEXT        NOT NULL UNIQUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    n_queries   INTEGER     NOT NULL DEFAULT 1
+    id          SERIAL          PRIMARY KEY,
+    session_id  TEXT            NOT NULL UNIQUE,
+    created_at  TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    last_seen   TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    n_queries   INTEGER         NOT NULL DEFAULT 1
 );
 """
 
-# Index on timestamp for fast drift queries like:
+# Index on timestamp — speeds up drift queries like:
 #   SELECT AVG(rainfall) FROM predictions
 #   WHERE timestamp > NOW() - INTERVAL '7 days'
-CREATE_TIMESTAMP_INDEX = """
+CREATE_IDX_TIMESTAMP = """
 CREATE INDEX IF NOT EXISTS idx_predictions_timestamp
     ON predictions (timestamp DESC);
 """
 
-# Index on session_id for fast session lookups
-CREATE_SESSION_INDEX = """
+# Index on session_id — speeds up per-session lookups
+CREATE_IDX_SESSION = """
 CREATE INDEX IF NOT EXISTS idx_predictions_session
     ON predictions (session_id);
 """
 
 
+# ── Init function ─────────────────────────────────────────────────────────────
+
 def init_db():
     """
     Create all tables and indexes.
-    Safe to run multiple times — uses IF NOT EXISTS throughout.
+    Called directly when this script is run, or can be imported
+    and called from a startup hook if needed.
     """
     print("Connecting to PostgreSQL...")
     conn = get_connection()
     cur  = conn.cursor()
 
     print("Creating predictions table...")
-    cur.execute(CREATE_PREDICTIONS_TABLE)
+    cur.execute(CREATE_PREDICTIONS)
 
     print("Creating sessions table...")
-    cur.execute(CREATE_SESSIONS_TABLE)
+    cur.execute(CREATE_SESSIONS)
 
     print("Creating indexes...")
-    cur.execute(CREATE_TIMESTAMP_INDEX)
-    cur.execute(CREATE_SESSION_INDEX)
+    cur.execute(CREATE_IDX_TIMESTAMP)
+    cur.execute(CREATE_IDX_SESSION)
 
     cur.close()
     conn.close()
 
     print("\nDatabase initialised successfully.")
-    print("Tables: predictions, sessions")
-    print("You can now start the app:  python app.py")
+    print("Tables created: predictions, sessions")
+    print("\nNext step: python main.py")
 
 
 if __name__ == "__main__":

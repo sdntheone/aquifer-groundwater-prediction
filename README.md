@@ -1,103 +1,301 @@
 # AQUIFER — Groundwater Well-Presence Prediction
 
-A production-ready ML system that predicts groundwater well presence from terrain, climate, and land-use features. Combines a RandomForest classifier with LLM-powered explanations, a feature-form based UI, and full MLOps/containerization setup.
+A production-ready ML system that predicts groundwater well presence from terrain,
+climate, and land-use features. Built with a RandomForest classifier, a LangGraph
+multi-agent reasoning system, SHAP explainability, PostgreSQL memory, and a
+3-page interactive map UI.
 
-**→ See [SETUP_GUIDE.md](SETUP_GUIDE.md) for complete setup, usage, and deployment instructions.**
+---
 
-## Key Features
+## What This Project Does
 
-- **Feature-form interface** — Users enter 10 hydrological parameters; no lat/lon required
-- **LLM explanations** — Hugging Face model generates *why* a location is predicted to have groundwater
-- **Combination reasoning** — Explains how multiple features interact (e.g., "high rainfall + low slope = water lingers")
-- **Feature glossary** — Collapsible definitions so non-experts understand each parameter
-- **Live map** — Shows matched survey location and reverse-geocoded place name
-- **Input validation** — Ranges checked both client and server side
-- **Graceful fallback** — If Hugging Face unavailable, uses deterministic template reasoning
-- **MLOps-ready** — CI/CD pipeline with quality gates, Docker, Render/Vercel configs
+A user fills in 10 hydrological parameters for a site (elevation, rainfall, slope,
+drainage density, etc.). A multi-agent AI system investigates those inputs, predicts
+whether groundwater is likely to be present, locates the closest matching surveyed
+coordinate on a live map, and explains its reasoning in plain English — including
+which features drove the decision and how they interact.
 
-## Quick Start
+---
 
-```powershell
-cd gw_project
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python app.py
-```
+## Tech Stack
 
-Open http://localhost:5000
+| Layer | Technology |
+|-------|-----------|
+| ML model | scikit-learn RandomForest |
+| Explainability | SHAP TreeExplainer |
+| Agent orchestration | LangGraph |
+| LLM reasoning | Hugging Face Inference API |
+| Backend API | FastAPI + Uvicorn |
+| Database | PostgreSQL (Docker) |
+| Frontend | Leaflet.js + vanilla JS (3-page SPA) |
+| Observability | LangSmith |
+| Deployment | Docker, Render, GitHub Actions CI/CD |
+| Geocoding | OpenStreetMap Nominatim (free, no key) |
 
-**→ Full instructions in [SETUP_GUIDE.md](SETUP_GUIDE.md)**
-
-## What Makes This "Top-Tier"
-
-✓ **Science credibility**
-- Trained on 2,793 survey points with geographically-distributed data
-- 5-fold CV ROC-AUC ~0.98; explicitly handles class imbalance
-- Reasoning engine explains feature interactions, not just importance scores
-
-✓ **User experience**
-- Non-technical users can understand what each feature means (glossary panel)
-- Form-based input eliminates coordinate lookup confusion
-- Reasoning text clearly ties feature values to hydrogeology (infiltration, recharge, runoff)
-
-✓ **Production quality**
-- Full venv/Docker/CI setup — no "run this notebook" hand-waving
-- Quality gate in CI: model gates fail the build if metrics drop
-- Error handling & fallbacks (Hugging Face optional, not required)
-- Structured logging (training_log.json) for audit trail
-
-✓ **Transparent limitations**
-- Honestly documents the 39-well sample is small and fragile
-- Notes that coordinate matching is nearest-neighbor, not raster sampling
-- Clear about class imbalance and how it affects probability calibration
+---
 
 ## Architecture
 
 ```
-Request → Flask API → Feature validation → RandomForest predict
-                      ↓
-                Find nearest match in dataset (feature space)
-                      ↓
-                Reverse-geocode coordinate → place name
-                      ↓
-                LLM reasoning (or template fallback)
-                      ↓
-                JSON response + map marker
+User submits 10 feature values
+         │
+         ▼
+FastAPI (main.py)
+  ├── Pydantic type validation (automatic)
+  ├── Range validation against training data min/max
+  ├── Nearest-neighbour lookup in feature space → lat/lon
+  ├── Reverse geocode → place name (Nominatim)
+  ├── Fetch session memory (in-process dict)
+  ├── Fetch aggregate stats (PostgreSQL)
+  │
+  └── LangGraph agent graph
+        │
+        ├── Investigator Agent
+        │     ├── Tool 1: run_prediction()       — RF model inference
+        │     ├── Tool 2: get_shap_values()      — per-prediction SHAP
+        │     ├── Tool 3: get_feature_context()  — distribution lookup
+        │     └── Tool 4: check_sensitivity()    — conditional what-if
+        │           (called only for conflicting or borderline cases)
+        │
+        └── Communicator Agent
+              └── generate_llm_reasoning()       — HF LLM or template fallback
+                    └── returns 5-7 sentence plain-English explanation
+
+  ├── Log prediction to PostgreSQL
+  ├── Update session memory
+  └── Return JSON → browser renders map marker + results
 ```
 
-## Deployment
+---
 
-- **Render** (recommended): `render.yaml` auto-detected
-- **Docker**: Build from `Dockerfile`, deploy anywhere
-- **Vercel** (light use): Serverless Python runtime
+## Three Memory Layers
 
-All configs included; pick your platform.
+| Layer | Where | Scope | Purpose |
+|-------|-------|-------|---------|
+| Working memory | LangGraph `InvestigationState` | Single request | Accumulates tool outputs within one agent run |
+| Session memory | In-process Python dict | One browser session | Lets agent compare current site to previous ones checked |
+| Long-term memory | PostgreSQL `predictions` table | Permanent | Drift detection, aggregate stats, full audit trail |
+
+---
+
+## Project Structure
+
+```
+gw_project/
+├── train.py                  ← [Run first] trains RF + builds SHAP explainer
+├── predict.py                ← [Run second] scores all points + builds GeoJSON
+├── init_db.py                ← [Run third] creates PostgreSQL tables
+├── main.py                   ← FastAPI backend (all API endpoints)
+├── agent.py                  ← LangGraph multi-agent system
+├── reasoning.py              ← feature metadata + template explanation engine
+├── llm_reasoning.py          ← Hugging Face API wrapper with fallback
+├── memory_store.py           ← session memory + PostgreSQL long-term memory
+│
+├── data/
+│   ├── TRAIN_POINT.xlsx      ← 2,793 labeled survey points
+│   ├── prediction_point.xlsx ← unlabeled points to score
+│   ├── predictions.csv       ← generated: all points scored
+│   └── prediction_log.jsonl  ← generated at runtime: every API call
+│
+├── model/                    ← generated by train.py
+│   ├── rf_model.joblib
+│   ├── shap_explainer.joblib
+│   ├── feature_columns.json
+│   ├── feature_stats.json
+│   ├── feature_importance.json
+│   ├── metrics.json
+│   └── training_log.json
+│
+├── static/
+│   ├── points.geojson        ← 2 sample reference points for map
+│   └── points_full.geojson   ← all scored points
+│
+├── templates/
+│   └── index.html            ← 3-page frontend (Discover / Investigate / Results)
+│
+├── docker-compose.yml        ← PostgreSQL + app containers
+├── Dockerfile                ← containerized deployment
+├── requirements.txt
+├── Procfile                  ← Render/Heroku deployment
+├── render.yaml               ← Render one-click config
+├── .env.example              ← documents all environment variables
+└── .github/workflows/
+    └── ml-pipeline.yml       ← CI/CD: retrain + quality gate + Docker build
+```
+
+---
+
+## Quick Start (Windows)
+
+```powershell
+# 1. Create and activate virtual environment
+cd gw_project
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Train the model
+python train.py
+
+# 4. Score all points and build map data
+python predict.py
+
+# 5. Start PostgreSQL (requires Docker Desktop)
+docker-compose up db -d
+
+# 6. Create database tables
+python init_db.py
+
+# 7. Start the app
+python main.py
+```
+
+Open **http://localhost:5000** in your browser.
+Open **http://localhost:5000/docs** for the auto-generated FastAPI API documentation.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SECRET_KEY` | Yes | Signs session cookies — use a random string in production |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `HF_API_TOKEN` | No | Hugging Face token — app works without it (uses template fallback) |
+| `HF_MODEL` | No | HF model ID (default: `mistralai/Mistral-7B-Instruct-v0.3`) |
+| `LANGCHAIN_TRACING_V2` | No | Set `true` to enable LangSmith tracing |
+| `LANGCHAIN_API_KEY` | No | LangSmith API key |
+| `LANGCHAIN_PROJECT` | No | LangSmith project name (default: `aquifer-groundwater`) |
+| `PORT` | No | Port to run on (default: `5000`) |
+
+Get a free **Hugging Face token** at huggingface.co → Settings → Access Tokens.
+Get a free **LangSmith key** at smith.langchain.com → Settings → API Keys.
+
+---
+
+## How to Use the App
+
+**Page 1 — Discover**
+Read what the project does and check the feature glossary — plain-English definitions
+of all 10 input parameters with their physical ranges explained.
+
+**Page 2 — Investigate**
+Fill in all 10 feature values. Each field shows its valid range (1–5 ordinal class).
+Client-side validation highlights any out-of-range values before you submit.
+
+**Page 3 — Results**
+After submission you get four tabs:
+- **Reasoning** — 5–7 sentence plain-English explanation from the LLM (or template)
+- **SHAP** — horizontal bar chart showing which features pushed this specific prediction up or down
+- **Sensitivity** — what-if analysis: "if RAINFALL changed from class 3 to 4, probability would shift +9pp"
+- **Agent Trace** — full log of every tool call the Investigator Agent made
+
+The map drops a marker at the closest matching surveyed coordinate and shows
+the reverse-geocoded place name in the sidebar.
+
+---
 
 ## Model Details
 
 | Metric | Value |
 |--------|-------|
-| Training data | 2,793 survey points |
-| Positive class | 39 confirmed wells (~1.4%) |
-| Features | 10 (terrain, climate, land-use) |
-| Algorithm | RandomForest (400 trees, balanced class weight) |
-| CV ROC-AUC | 0.98 |
-| Test Precision | 100% (very few false alarms) |
-| Test Recall | 88% (catches most wells) |
+| Training points | 2,793 survey points (Bundelkhand region, India) |
+| Positive class | 39 confirmed wells (~1.4% of data) |
+| Features | 10 (terrain, climate, land-use — all 1–5 ordinal classes) |
+| Algorithm | RandomForest (400 trees, `class_weight="balanced"`) |
+| CV ROC-AUC | ~0.98 (5-fold stratified) |
+| Test precision | ~100% |
+| Test recall | ~88% |
+| Test F1 | ~0.93 |
 
-## Next Steps
-
-**See [SETUP_GUIDE.md](SETUP_GUIDE.md) for:**
-- Detailed setup instructions (Windows/Mac/Linux)
-- How to use the feature form
-- Hugging Face LLM integration
-- Deployment to Render/Docker
-- Troubleshooting guide
-- Model improvement ideas
+**Honest caveats:**
+- Only 39 positive examples — model may be fragile to new data distributions
+- Features are discretized ordinal classes (1–5), not raw continuous measurements
+- Coordinate matching uses nearest-neighbour in feature space, not actual raster sampling
+- `class_weight="balanced"` is critical — without it the model would always predict 0
 
 ---
 
-**Built with:** scikit-learn, Flask, Leaflet.js, Hugging Face API, OpenStreetMap
+## API Endpoints
 
-**Status:** Production-ready. Limitations and caveats documented.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | 3-page map UI |
+| `GET` | `/docs` | Auto-generated API documentation (FastAPI) |
+| `GET` | `/api/health` | Health check — returns config flags |
+| `GET` | `/api/feature_ranges` | Valid min/max per feature (for form validation) |
+| `GET` | `/api/feature_info` | Feature descriptions and metadata (for glossary) |
+| `POST` | `/api/predict_features` | Main prediction endpoint — runs full agent pipeline |
+
+---
+
+## Deployment
+
+### Render (recommended)
+1. Push to GitHub
+2. Render Dashboard → New Web Service → connect repo
+3. Render auto-detects `render.yaml`
+4. Set environment variables in Render Dashboard → Environment
+5. Deploy
+
+### Docker
+```bash
+docker build -t groundwater-app .
+docker run -p 5000:5000 --env-file .env groundwater-app
+```
+
+### Docker Compose (app + database together)
+```bash
+docker-compose up --build
+```
+
+---
+
+## CI/CD Pipeline
+
+Every push to `main` triggers `.github/workflows/ml-pipeline.yml`:
+
+1. Installs dependencies
+2. Runs `train.py` — trains model and SHAP explainer
+3. Runs `predict.py` — scores all points
+4. **Quality gate** — fails the build if CV ROC-AUC drops below 0.80
+5. **Artifact check** — fails if `shap_explainer.joblib` is missing or empty
+6. Uploads model artifacts to GitHub Actions
+7. Builds Docker image to confirm containerization works
+
+---
+
+## Agentic AI — Interview Summary
+
+| Question | Answer |
+|----------|--------|
+| Tool calling? | 4 tools called conditionally by Investigator Agent |
+| Multi-agent? | Investigator (analytical) + Communicator (linguistic) |
+| Memory? | Working (LangGraph state) + Session (dict) + Long-term (PostgreSQL) |
+| Observability? | LangSmith traces every run — tool sequence, latency, tokens |
+| Explainability? | SHAP TreeExplainer, per-prediction, passed as agent context |
+| Drift detection? | Every prediction logged to PostgreSQL, feature averages queryable |
+| Framework? | LangGraph for orchestration, FastAPI for serving |
+| Why this architecture? | Mirrors how a real hydrogeologist investigates a site |
+
+---
+
+## Built With
+
+- **scikit-learn** — RandomForest model
+- **shap** — TreeExplainer for per-prediction feature attribution
+- **LangGraph / LangChain** — multi-agent orchestration
+- **LangSmith** — agent observability and tracing
+- **FastAPI + Uvicorn** — async backend with auto-generated docs
+- **PostgreSQL + psycopg2** — persistent prediction logging
+- **Leaflet.js** — interactive map
+- **Hugging Face Inference API** — LLM text generation
+- **OpenStreetMap Nominatim** — reverse geocoding (free)
+
+---
+
+**Status:** Production-ready. Limitations documented honestly.
